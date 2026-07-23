@@ -1,0 +1,87 @@
+{
+    "空节点": {},
+    "panduan_zhujiemian": {
+        "next": [
+            "[JumpBack]amazing_discount",
+            "[JumpBack]panduan_zhujiemian_ks",
+            "[JumpBack]close_exit_confirm",
+            "zai_zhujiemian"
+        ]
+    },
+    "panduan_zhujiemian_ks": {
+        "inverse": true,
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/jiahao_win32.png",
+            "zonghe/chenghao_win32.png",
+            "zonghe/baoguo_win32.png",
+            "zonghe/baoguo_man_win32.png"
+        ],
+        "roi": [
+            1197,
+            540,
+            78,
+            157
+        ],
+        "pre_delay": 1000,
+        "action": "ClickKey",
+        "post_wait_freezes": 200,
+        "key": [
+            27
+        ],
+        "post_delay": 500,
+        "!shikong": "OK: jiahao score=0.713 baoguo=0.999 baoguo_man=0.825 全部>0.7。chenghao score=0.573略低于0.7但不影响(MaaFw首个命中即停，jiahao已命中)。key[4]->[27]"
+    },
+    "close_exit_confirm": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/exit_confirm.png"
+        ],
+        "roi": [
+            246,
+            398,
+            791,
+            200
+        ],
+        "action": "ClickKey",
+        "post_wait_freezes": 200,
+        "key": [
+            27
+        ],
+        "post_delay": 500,
+        "!shikong": "未触发: 弹窗未出现无法测试。key[4]->[27]"
+    },
+    "amazing_discount": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/amazing_discount.png"
+        ],
+        "roi": [
+            233,
+            40,
+            846,
+            324
+        ],
+        "next": [
+            "amazing_discount_close"
+        ],
+        "!shikong": "FAIL: 全屏thresh=0.3最高0.19。模板不兼容(ADB截图)"
+    },
+    "amazing_discount_close": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/amazing_discount_close.png"
+        ],
+        "roi": [
+            947,
+            61,
+            120,
+            127
+        ],
+        "action": "Click",
+        "!shikong": "PARTIAL: score=0.41@[1059,33] thresh=0.3。依赖amazing_discount"
+    },
+    "zai_zhujiemian": {
+        "pre_delay": 1000
+    }
+}
