@@ -7,7 +7,7 @@
     "启动游戏": {
         "action": "StartApp",
         "package": "com.netease.myq",
-        "post_delay": 20000,
+        "post_delay": 40000,
         "next": [
             "主界面",
             "点击登录游戏",
