@@ -162,34 +162,46 @@ class AIAnswer(CustomRecognition):
                 for key, value in valid_answers.items():
                     prompt += f"{key}: {value}\n"
 
-                # openai api协议调用
+                # 同时支持 OpenAI 兼容 /v1/chat/completions 与 Ollama 原生 /api/chat。
                 url = UIurl
                 apiKey = UIpiKey
+                # Ollama 必须走原生 /api/chat + think:false 才能关掉 qwen3 系列的思考；
+                # /v1 端点会忽略 think 字段，思考会把 max_tokens 吃光、content 返回空。
+                is_ollama_native = url.rstrip("/").endswith("/api/chat")
 
                 headers = {
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {apiKey}"
                 }
 
-                data = {
-                    "model": UImodel,   
-                    "messages": [
-                        {"role": "system", "content": "You are a helpful assistant."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "thinking": {"type": "disabled"},
-                    "temperature": 0.7,
-                    "max_tokens": 10,
-                    "stream": False
-                }
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": prompt},
+                ]
+                if is_ollama_native:
+                    # Ollama 原生端点：think:false 关思考；不要带 max_tokens（关了思考后答案就 1 个 token）。
+                    data = {"model": UImodel, "messages": messages, "stream": False, "think": False}
+                else:
+                    # OpenAI 兼容端点：保留原行为。
+                    data = {
+                        "model": UImodel,
+                        "messages": messages,
+                        "thinking": {"type": "disabled"},
+                        "temperature": 0.7,
+                        "max_tokens": 10,
+                        "stream": False,
+                    }
 
                 try:
                     response = requests.post(url, headers=headers, data=json.dumps(data))
                     response.raise_for_status()  # 如果请求失败，则引发HTTPError
 
-                    # 解析AI的回复
+                    # 解析AI的回复（两种端点的响应结构不同）
                     ai_response = response.json()
-                    ai_answer = ai_response['choices'][0]['message']['content'].strip().upper()
+                    content = (ai_response["message"]["content"]
+                               if is_ollama_native
+                               else ai_response["choices"][0]["message"]["content"])
+                    ai_answer = content.strip().upper()
 
                     # 验证AI的回复
                     if ai_answer in valid_answers:

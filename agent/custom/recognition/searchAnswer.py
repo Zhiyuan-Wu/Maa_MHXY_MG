@@ -15,11 +15,13 @@ import difflib
 # log_file_path = r"agent\custom\recognition\search_log.txt"
 # log_file_path = os.path.abspath(log_file_path)
 
-# 生产环境路径，兼容win和mac
-file_path = os.path.join("agent", "custom", "recognition", "tiku.txt")
-file_path = os.path.abspath(file_path)
-log_file_path = os.path.join("agent", "custom", "recognition", "search_log.txt")
-log_file_path = os.path.abspath(log_file_path)
+# 生产环境路径：相对**本文件**定位（不依赖启动 CWD）。
+# 原来用 os.path.join("agent",...) 相对 CWD 解析——从 autolife 等别的目录拉起 run_5r 时，
+# CWD 不是仓库根，会指到 <CWD>/agent/custom/recognition/tiku.txt，找不到题库 → SearchQuestions
+# 返回 None → 调用方解包抛 TypeError。相对 __file__ 定位则永远指向本模块同目录的 tiku.txt。
+_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+file_path = os.path.join(_FILE_DIR, "tiku.txt")
+log_file_path = os.path.join(_FILE_DIR, "search_log.txt")
 
 def load_question_bank(file_path):
     """
@@ -145,7 +147,9 @@ def SearchQuestions(query):
     
     if not question_bank:
         print("题库加载失败或为空")
-        return
+        # 绝不返回 None：调用方 `a, b, c = SearchQuestions(...)` 解包 None 会抛 TypeError、
+        # 中断整个识别回调。返回零置信度三元组，让上层走"未匹配"分支（confidence<80）。
+        return [], 0, "题库加载失败"
     
     # print(f"题库加载成功，共有 {len(question_bank)} 个问题")
     # print("输入 'q' 或 'exit' 退出程序")
