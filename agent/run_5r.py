@@ -61,11 +61,11 @@ REPO_DIR = r"C:\dev\Maa_MHXY_MG"
 # 五开角色 → MuMu 实例 ADB 地址。MuMu12 约定 adb_port = 16384 + 32*index，
 # 故 index = (port - 16384) // 32；ROLES 的顺序即账号编号顺序（solo --ids 用，从 1 起）。
 ROLES = {
-    "队长": "127.0.0.1:16384",
-    # "渣中": "127.0.0.1:16416",
-    # "6130": "127.0.0.1:16448",
-    #"缤纷": "127.0.0.1:16480",
-    # "晚风": "127.0.0.1:16512",
+    "队长": "127.0.0.1:16512", #id=4 title=3
+    "渣中": "127.0.0.1:16576", #id=6 title=5
+    "6130": "127.0.0.1:16544", #id=5 title=4
+    "缤纷": "127.0.0.1:16448", #id=2 title=1
+    "晚风": "127.0.0.1:16480", #id=3 title=2
 }
 PACKAGE        = "com.netease.my"      # 游戏包名（仓库 start.json 里的 myq 是错的，用这个）
 FUBEN_ENTRY    = "fuben115"            # 组队副本 entry（base 即 全自动 接双侠士路线，无需 option）
@@ -73,7 +73,7 @@ FUBEN_ENTRY    = "fuben115"            # 组队副本 entry（base 即 全自动
 # 启动（不耗计数器），抓鬼轮次计算-max-fuben 在每轮末尾命中一次再启下一轮——故 4 轮对应 max_hit=3。
 # standalone 的 post_task 不读 interface.json option，base 默认不挂限轮器（抓鬼一轮完成→队伍满员判断
 # 会无限循环），故 team_run 必须显式把 抓鬼一轮完成.next 改写到 抓鬼轮次计算-max-fuben。
-ZHUOGUI_ROUNDS = 5
+ZHUOGUI_ROUNDS = 2
 
 # 队长单人无限捉鬼模式的 override（``python run_5r.py zhuagui``）—— 对应 interface.json option
 # 「（开启/关闭）人员检测-（是否）进入轮次选择」→「关闭人员检测-不进入轮次选择」。
@@ -91,11 +91,11 @@ ZHUAGUI_OVERRIDE = {
 }
 # MUMU_MANAGER   = r"C:\Program Files\Netease\MuMu Player 12\nx_main\MuMuManager.exe"
 MUMU_MANAGER   = r"C:\Program Files\Netease\MuMu\nx_main\MuMuManager.exe"
-LAUNCH_STAGGER = 10                    # 启动错峰间隔秒数：ensure_instances 逐台拉 MuMu 实例、
+LAUNCH_STAGGER = 30                    # 启动错峰间隔秒数：ensure_instances 逐台拉 MuMu 实例、
                                        # launch_parallel 逐账号跑 start 登录，相邻两次都至少隔这么久（0=齐发）
 TIMEOUTS = {                           # 各步墙钟超时（秒）
     "start": 600, "chuangjianduiwu": 180, "duizhang": 600,
-    "fuben": 7200, "duizhang_TR": 300, "duiyuan": 7200,
+    "fuben": 10080, "duizhang_TR": 300, "duiyuan": 7200,
     "solo": 2400,          # 单个 solo 任务的墙钟超时
     "solo_overall": 7200,  # 整轮 solo（全部账号×全部任务）的墙钟总超时；到点未完则收口退出
     "zhuagui": 14400,      # 队长无限捉鬼的墙钟安全帽（4h）；实际靠 Ctrl+C 停，到点 post_stop 收口
