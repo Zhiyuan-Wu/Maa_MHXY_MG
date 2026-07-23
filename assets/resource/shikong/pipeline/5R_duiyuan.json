@@ -1,0 +1,300 @@
+{
+    "5R_duiyuan": {
+        "next": [
+            "队员过渡",
+            "[JumpBack]panduan_zhujiemian"
+        ]
+    },
+    "队员过渡": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/chenghao_win32.png",
+            "zonghe/jiahao_win32.png"
+        ],
+        "roi": [
+            1200,
+            630,
+            80,
+            90
+        ],
+        "next": [
+            "[JumpBack]未在队伍中-关闭队伍界面",
+            "[JumpBack]展开-首页任务栏",
+            "[JumpBack]任务栏切换为队伍",
+            "已经在队伍中",
+            "接受队长邀请",
+            "[JumpBack]队员等待邀请"
+        ],
+        "!shikong实测": "TemplateMatch: base roi=[1206,637,66,57] (右下角 称号/+ 图标区，§3.5 标注该区域基本不变)。模板 chenghao.png/jiahao.png 为 base 版占位（zonghe 下已有 chenghao_win32.png/jiahao_win32.png 可参照替换）。未实测，待用户重制/确认 _win32 模板后用 maa_cli TemplateMatch 验证 hit"
+    },
+    "任务栏切换为队伍-一次": {
+        "max_hit": 1,
+        "inverse": true,
+        "recognition": "Or",
+        "any_of": [
+            {
+                "recognition": "OCR",
+                "expected": [
+                    "组建",
+                    "加入",
+                    "队伍"
+                ],
+                "roi": [
+                    1117,
+                    218,
+                    154,
+                    45
+                ]
+            },
+            {
+                "recognition": "OCR",
+                "expected": [
+                    "创建",
+                    "找队"
+                ],
+                "roi": [
+                    1107,
+                    318,
+                    172,
+                    39
+                ]
+            },
+            {
+                "recognition": "TemplateMatch",
+                "template": "r5/duiwu_xuetiao_win32.png",
+                "roi": [
+                    1172,
+                    139,
+                    79,
+                    34
+                ]
+            }
+        ],
+        "pre_delay": 500,
+        "action": "Click",
+        "target": [
+            1218,
+            88,
+            44,
+            16
+        ],
+        "post_delay": 500
+    },
+    "任务栏切换为队伍": {
+        "inverse": true,
+        "recognition": "Or",
+        "any_of": [
+            {
+                "recognition": "OCR",
+                "expected": [
+                    "组建",
+                    "加入",
+                    "队伍"
+                ],
+                "roi": [
+                    1117,
+                    218,
+                    154,
+                    45
+                ]
+            },
+            {
+                "recognition": "OCR",
+                "expected": [
+                    "创建",
+                    "找队"
+                ],
+                "roi": [
+                    1107,
+                    318,
+                    172,
+                    39
+                ]
+            },
+            {
+                "recognition": "TemplateMatch",
+                "template": "r5/duiwu_xuetiao_win32.png",
+                "roi": [
+                    1172,
+                    139,
+                    79,
+                    34
+                ]
+            }
+        ],
+        "pre_delay": 500,
+        "action": "Click",
+        "target": [
+            1218,
+            88,
+            44,
+            16
+        ],
+        "post_delay": 500
+    },
+    "未在队伍中-关闭队伍界面": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "r5/duiwujiemian_win32.png"
+        ],
+        "roi": [
+            181,
+            96,
+            169,
+            64
+        ],
+        "threshold": 0.9,
+        "pre_delay": 500,
+        "action": "ClickKey",
+        "key": [
+            27
+        ],
+        "post_delay": 500
+    },
+    "已经在队伍中": {
+        "focus": {
+            "Node.Recognition.Succeeded": "已经在队伍中"
+        },
+        "recognition": "TemplateMatch",
+        "template": [
+            "r5/duiwu_xuetiao.png"
+        ],
+        "roi": [
+            1036,
+            166,
+            239,
+            333
+        ],
+        "next": [
+            "队员-进入队伍成功"
+        ],
+        "!shikong实测": "TemplateMatch: base roi=[1036,166,239,333]（右侧队员血条区）。模板 r5/duiwu_xuetiao.png 为 base 版占位，待用户重制 _win32 后用 maa_cli 验证 hit"
+    },
+    "队员等待邀请": {
+        "inverse": true,
+        "recognition": "TemplateMatch",
+        "template": [
+            "r5/yaoqing1_win32.png"
+        ],
+        "roi": [
+            0,
+            128,
+            391,
+            311
+        ],
+        "green_mask": true,
+        "pre_delay": 5000
+    },
+    "接受队长邀请": {
+        "focus": {
+            "Node.Action.Succeeded": "接受邀请，进入队伍"
+        },
+        "recognition": "And",
+        "all_of": [
+            {
+                "recognition": "OCR",
+                "expected": [],
+                "roi": [
+                    183,
+                    331,
+                    133,
+                    34
+                ]
+            },
+            {
+                "recognition": "TemplateMatch",
+                "template": [
+                    "r5/yaoqing1_win32.png"
+                ],
+                "roi": [
+                    0,
+                    128,
+                    391,
+                    311
+                ],
+                "green_mask": true
+            }
+        ],
+        "pre_delay": 500,
+        "action": "Click",
+        "target": [
+            183,
+            331,
+            133,
+            34
+        ],
+        "post_delay": 1000,
+        "next": [
+            "队员-进入队伍成功"
+        ]
+    },
+    "队员-进入队伍成功": {
+        "next": [
+            "[JumpBack]队伍-退出组队界面",
+            "[JumpBack]接受队长进入副本申请",
+            "[JumpBack]展开-首页任务栏",
+            "[JumpBack]任务栏切换为队伍",
+            "等待被踢出队伍",
+            "[JumpBack]战斗中-等待100秒",
+            "[JumpBack]队员等待3秒",
+            "[JumpBack]队员等待10秒"
+        ]
+    },
+    "接受队长进入副本申请": {
+        "recognition": "OCR",
+        "expected": [
+            "准备"
+        ],
+        "roi": [
+            697,
+            536,
+            148,
+            62
+        ],
+        "pre_delay": 500,
+        "action": "Click"
+    },
+    "队员等待3秒": {
+        "max_hit": 100,
+        "pre_delay": 3000
+    },
+    "队员等待10秒": {
+        "pre_delay": 10000
+    },
+    "等待被踢出队伍": {
+        "recognition": "Or",
+        "any_of": [
+            {
+                "recognition": "OCR",
+                "expected": [
+                    "组建",
+                    "加入",
+                    "队伍"
+                ],
+                "roi": [
+                    1117,
+                    218,
+                    154,
+                    45
+                ]
+            },
+            {
+                "recognition": "OCR",
+                "expected": [
+                    "创建",
+                    "找队"
+                ],
+                "roi": [
+                    1107,
+                    318,
+                    172,
+                    39
+                ]
+            }
+        ],
+        "pre_delay": 500,
+        "next": [
+            "panduan_zhujiemian"
+        ]
+    }
+}

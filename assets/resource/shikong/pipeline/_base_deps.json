@@ -82,5 +82,52 @@
     },
     "zai_zhujiemian": {
         "pre_delay": 1000
+    },
+    "展开-首页任务栏": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/rwl_suojin_win32.png"
+        ],
+        "roi": [
+            1226,
+            75,
+            55,
+            49
+        ],
+        "pre_delay": 200,
+        "action": "Click",
+        "post_delay": 500
+    },
+    "队伍-退出组队界面": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "r5/duiwujiemian_win32.png"
+        ],
+        "roi": [
+            181,
+            96,
+            169,
+            64
+        ],
+        "threshold": 0.9,
+        "pre_delay": 500,
+        "action": "ClickKey",
+        "key": [
+            27
+        ],
+        "post_delay": 500
+    },
+    "战斗中-等待100秒": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zhandou/zhandouzhong_win32.png"
+        ],
+        "roi": [
+            1212,
+            623,
+            68,
+            93
+        ],
+        "pre_delay": 100000
     }
 }
