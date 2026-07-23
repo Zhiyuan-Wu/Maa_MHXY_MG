@@ -1,9 +1,16 @@
 {
     "shuangbei": {
         "next": [
-            "双倍-打开挂机-按下Alt",
-            "[JumpBack]panduan_zhujiemian"
+            "[JumpBack]shuangbei-回到主界面",
+            "双倍-打开挂机-按下Alt"
         ]
+    },
+    "shuangbei-回到主界面": {
+        "pre_delay": 1000,
+        "next": [
+            "panduan_zhujiemian"
+        ],
+        "max_hit": 1
     },
     "双倍-打开挂机-按下Alt": {
         "pre_wait_freezes": 1,

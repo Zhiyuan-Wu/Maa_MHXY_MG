@@ -38,18 +38,17 @@
             "zonghe/exit_confirm.png"
         ],
         "roi": [
-            246,
-            398,
-            791,
-            200
+            302,
+            356,
+            655,
+            191
         ],
         "action": "ClickKey",
         "post_wait_freezes": 200,
         "key": [
             27
         ],
-        "post_delay": 500,
-        "!shikong": "未触发: 弹窗未出现无法测试。key[4]->[27]"
+        "post_delay": 500
     },
     "amazing_discount": {
         "recognition": "TemplateMatch",
@@ -65,7 +64,7 @@
         "next": [
             "amazing_discount_close"
         ],
-        "!shikong": "FAIL: 全屏thresh=0.3最高0.19。模板不兼容(ADB截图)"
+        "!shikong": "未触发: 弹窗未出现无法测试。"
     },
     "amazing_discount_close": {
         "recognition": "TemplateMatch",
@@ -79,7 +78,7 @@
             127
         ],
         "action": "Click",
-        "!shikong": "PARTIAL: score=0.41@[1059,33] thresh=0.3。依赖amazing_discount"
+        "!shikong": "未触发: 弹窗未出现无法测试。"
     },
     "zai_zhujiemian": {
         "pre_delay": 1000
