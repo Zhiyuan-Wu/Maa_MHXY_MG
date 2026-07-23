@@ -212,9 +212,9 @@ python maa_cli.py action ClickKey '{"key":[27]}' && panel   # panel-open=FALSE
 
 原则：
 1. base中所有步骤必须完整迁移，严格禁止只迁移部分、把一些节点放在未来去做。没有完全交付=失败。base中的所有节点、动作、判断逻辑必须都在，不能替换成所谓等效节点。仅可以**新增**（不是替换）针对shikong的冗余判断逻辑（例如ocr/模板多路判断，按键/点击多路动作等，但必须与用户确认）
-2. base中的所有坐标、模板都可能失效，需要逐个确认，而不是抽样。
-3. 所有验证步骤必须使用maa_cli.py做实际测试，禁止语法通过就报告完成。
-4. 你需要标记出确认失效的roi/模板，由用户修复资源后重复测试，协助工作直到所有节点检查通过。（严格禁止：某个模板失效、替换为ocr）
+2. base 中的 OCR roi、图片模板、固定坐标（Swipe 的 `begin`/`end`、Click 的 `target`）在 shikong 下都可能失效。**只要求逐个实测寻找 OCR 的 roi**（宽范围 OCR 搜出目标文字实际 box，重建 roi 并验证 hit）。**图片模板和固定坐标只需给出推测值**（按 §3.5 偏移规律估算），在 JSON 标注 `!shikong实测` 待用户处理，不要求实测修正——模板要用户重制 `_win32` 截图，坐标要用户在真实 UI 下标定，均无法靠 maa_cli 自动修正。
+3. OCR roi 的验证步骤必须使用 maa_cli.py 做实际测试，禁止语法通过就报告完成。
+4. OCR roi 实测 hit 即直接更新到 JSON。模板和固定坐标：给出推测值 + `!shikong实测` 标注（写清推测依据、近似位置、待用户验证），交用户修复/标定。（严格禁止：模板失效→替换为 OCR；禁止新增 base 没有的 `threshold`）
 5. OCR不可靠。
 
 ### 迁移前必须阅读
@@ -295,7 +295,7 @@ python maa_cli.py action KeyUp   '{"key":18}'     # Alt 松开
 
 **单键 ESC** 保持 `ClickKey key:[27]`，无需改为 KeyDown/KeyUp。
 
-### Step3 逐个节点实测验证
+### Step3 逐个节点处理（OCR 实测，模板/坐标给推测值）
 
 **前置：启动服务**（终端1）：
 ```bash
@@ -344,35 +344,25 @@ python maa_cli.py reco OCR '{"expected":["领取"],"roi":[860,510,100,80]}'
 
 **已验证的 roi 直接更新到 json 中**，无需标记。
 
-#### 3.3 模板节点验证流程
+#### 3.3 模板节点与固定坐标节点：给推测值，不实测修正
 
-对每个 TemplateMatch 节点：
+适用于 TemplateMatch 节点，以及带固定坐标的动作节点（Swipe 的 `begin`/`end`、Click 的 `target:[x,y,w,h]`）。
 
-```bash
-# 1. 用 base 原始模板 + base 原始 roi + 默认 threshold 测试
-python maa_cli.py reco TemplateMatch '{"template":["zonghe/jiahao.png"],"roi":[1197,540,78,157]}'
-# hit=False → ADB 模板在 Win32 上不兼容（典型 score 0.3-0.43）
+**不要尝试修正**：base 模板在 Win32 渲染下普遍不匹配（典型 score 0.3-0.5），且模板/坐标都无法靠 maa_cli 自动修复——模板要用户从 shikong 重截 `_win32` 版，坐标要用户在真实可交互 UI 下标定。只做：
 
-# 2. 模糊匹配找大致位置（降低阈值到 0.3，扩大 roi）
-python maa_cli.py reco TemplateMatch '{"template":["zonghe/jiahao.png"],"roi":[1100,0,180,720],"threshold":[0.3]}'
-# hit=True, box=[1231,664,44,42] score=0.48 → 位置仍在 base roi 内
-
-# 3. 标记失效，交用户修复
-# 在 node 的 JSON 中添加 "!shikong实测" 标注：
-#   - 哪个模板 miss，score 多少
-#   - 模糊匹配找到的近似位置
-#   - 建议用户从 shikong 截图、保持相同尺寸
-```
+1. 按 §3.5 偏移规律估算 shikong 下的 roi/坐标推测值（顶部 x 偏移约 0-50px、中部约 60-120px、底部右侧几乎不变；纵向同步偏移）
+2. 在节点 JSON 加 `!shikong实测` 注释，写清：
+   - base 原值
+   - 推测值或估算式（如"按偏移规律 x-Δ y-Δ 估算"）
+   - "待用户重制 `_win32` 模板"或"待用户标定坐标"
+3. 把 base 模板图片拷到 `assets/resource/shikong/image/<功能>/`（用户会替换为 `_win32` 版）
 
 **严格禁止**：
 - 模板失效→替换为 OCR ✗
-- 降低 `threshold` ✗（base 没有的字段不能加）
-- 静默跳过未触发的节点 ✗
+- 新增 base 没有的 `threshold` ✗
+- 静默跳过节点 ✗（必须给推测值 + 标注）
 
-**正确做法**：
-- 标记 `!shikong实测` 注释在对应的 node 字段中
-- 标注原因、实测 score、是否需要用户修复
-- 模糊匹配确认大致位置后告知用户："图标在 roi 内，只需重截"
+> 若需大致确认模板对应的 UI 位置（仅为给推测值提供依据，不是修正），可做一次性宽搜：`python maa_cli.py reco TemplateMatch '{"template":["xxx.png"],"roi":[0,0,1282,720],"threshold":[0.3]}'`，取粗略 box 作为推测 roi 参考。
 
 #### 3.4 用户更新素材后的验证流程
 
@@ -407,7 +397,9 @@ python maa_cli.py reco TemplateMatch '{"template":["zonghe/xxx_win32.png"],"roi"
 
 **推断规则**：shikong 窗口 1282×720 vs ADB 1280×720，游戏内容区域偏左。顶部元素 x 偏移约 0-50px，中部约 60-120px，底部右侧元素位置几乎不变。
 
-推断失效 roi 时可按此规律估算，然后实测验证。验证通过则直接更新，不通过则标记交用户。
+**用途**（按 §原则2 区分对待）：
+- **OCR roi**：按此规律估算后**必须实测验证**，hit 则直接更新；
+- **模板 roi / 固定坐标**：按此规律估算出**推测值**写入 JSON + `!shikong实测` 标注即可，**不要求实测**。
 
 #### 3.6 通用验证脚本模板
 
@@ -449,15 +441,16 @@ do_alt_g() {
 - [ ] 所有节点引用可解析（`next`/`on_error` 中的节点名都存在于 pipeline JSON 中）
 - [ ] 所有 `ClickKey` 组合键已拆为 KeyDown/KeyUp 链
 - [ ] 所有 ADB 键码已替换为 Win32 VK
-- [ ] 每个 OCR roi 已实测验证（hit=True, score > 0.9）
-- [ ] 每个 TemplateMatch 模板已实测验证（hit=True, score > 0.7, 或无弹窗时标记未触发）
-- [ ] action动作结果符合预期（下一个节点能被命中）
-- [ ] 每个节点有 `!shikong实测` 注释或无需标注（全部通过）
-- [ ] 新增的 `_win32` 模板文件已放在 `zonghe/` 目录，文件名与 pipeline JSON 引用一致
-- [ ] 未测试到的链路已标注原因（弹窗未触发 / 模板待截取等）
+- [ ] 每个 **OCR roi 已实测验证**（hit=True, score > 0.9），hit 的直接更新到 JSON
+- [ ] 每个**模板节点**已给推测 roi + `!shikong实测` 标注（待用户重制 `_win32`，**不要求实测 hit**）
+- [ ] 每个**固定坐标节点**（Swipe `begin`/`end`、Click `target`）已给推测值 + `!shikong实测` 标注（待用户标定，**不要求实测**）
+- [ ] OCR 触发的动作实测通过（如按键/点击能打开目标面板）；依赖模板/坐标的动作已标注待用户验证
+- [ ] base 模板图片已拷到 `assets/resource/shikong/image/<功能>/`
+- [ ] 未覆盖的链路已标注原因（弹窗未触发 / 模板待截取 / 坐标待标定等）
 
 ## 9. 日志
 
 已完成的内容，请参考以下pipeline与base的区别，特别是roi、图片模板的变化：
 - panduan_zhujiemian
 - shuangbei
+- fuli_qiandao（福利签到）
