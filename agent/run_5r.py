@@ -95,7 +95,7 @@ LAUNCH_STAGGER = 30                    # 启动错峰间隔秒数：ensure_insta
                                        # launch_parallel 逐账号跑 start 登录，相邻两次都至少隔这么久（0=齐发）
 TIMEOUTS = {                           # 各步墙钟超时（秒）
     "start": 600, "chuangjianduiwu": 180, "duizhang": 600,
-    "fuben": 10080, "duizhang_TR": 300, "duiyuan": 7200,
+    "fuben": 7200, "duizhang_TR": 300, "duiyuan": 7200,
     "solo": 2400,          # 单个 solo 任务的墙钟超时
     "solo_overall": 7200,  # 整轮 solo（全部账号×全部任务）的墙钟总超时；到点未完则收口退出
     "zhuagui": 14400,      # 队长无限捉鬼的墙钟安全帽（4h）；实际靠 Ctrl+C 停，到点 post_stop 收口
@@ -339,17 +339,24 @@ def _launch_one(idx, package, retries=2):
     raise RuntimeError(f"MuMu 实例 {idx} launch 失败（重试 {retries} 次仍未起）：{last_err}")
 
 
-def ensure_instances(indices, package=PACKAGE, timeout=240):
-    """确保给定 MuMu 索引的实例都启动到 ``start_finished``。
+def ensure_instances(indices, package=PACKAGE, retries=2, cool_down=10, boot_come_up=180):
+    """确保每个 MuMu 实例的模拟器已启动、adb 可用（**交付界面：adb ready**）。
 
-    - 未启动的实例：**逐台** ``control -v <i> launch -pkg``（批量 launch 会触发 MuMuManager
-      偶发 ``0xC0000005`` 崩溃，见 ``_launch_one``；逐台 + 容错 + 重试保证冷启动可靠性）；
-    - 已在启动中/已就绪的实例：跳过 launch，只等就绪。
-    幂等：多次调用安全。返回 ``{index: adb_port}``。
+    两阶段：
+      A. 逐台 ``control launch -pkg``（错峰 ``LAUNCH_STAGGER``）——``-pkg`` 幂等、作保险；已跑的跳过。
+      B. 每台双重检查 adb 可用（``_adb_ready`` = connect + ``boot_completed=1``）：
+         检查①轮询到就绪（≤``boot_come_up``）→ 冷却 ``cool_down`` → 检查②。
+         任一未过即重拉该实例（``_launch_one``），``retries`` 轮仍不过则 raise。
+
+    崩溃 / 冷启动闪退**隐含**在 double-check 失败里——adb 不可用即重拉，无需状态跟踪。
+    幂等。返回 ``{index: addr}``。
     """
     indices = sorted(set(int(i) for i in indices))
-    info = mumu_info(",".join(map(str, indices)))
+    adb = _adb_path()
+    _adb_reset(adb, [_idx_to_addr(i) for i in indices])
 
+    # A. 逐台 launch（已跑的跳过）
+    info = mumu_info(",".join(map(str, indices)))
     to_launch = [i for i in indices if not info.get(str(i), {}).get("is_process_started")]
     for k, i in enumerate(to_launch):
         if k > 0:
@@ -357,21 +364,25 @@ def ensure_instances(indices, package=PACKAGE, timeout=240):
         print(f">>> 启动 MuMu 实例 {i}（control launch -pkg {package}）")
         _launch_one(i, package)
 
-    deadline = time.time() + timeout
-    ready = {}
-    while len(ready) < len(indices) and time.time() < deadline:
-        info = mumu_info(",".join(map(str, indices)))
-        for i in indices:
-            d = info.get(str(i), {})
-            if i not in ready and d.get("is_android_started") and d.get("player_state") == "start_finished":
-                ready[i] = int(d["adb_port"])
-        if len(ready) < len(indices):
-            time.sleep(3)
-    missing = [i for i in indices if i not in ready]
-    if missing:
-        raise RuntimeError(f"MuMu 实例 {missing} 在 {timeout}s 内未就绪（start_finished）")
-    print(f"<<< MuMu 实例就绪：{ready}")
-    return ready
+    # B. 逐台 double-check adb 可用；不过则重拉该实例
+    print(f">>> 逐台双重检查 adb 可用（cool_down={cool_down}s, boot_come_up={boot_come_up}s）")
+    failed = []
+    for i in indices:
+        addr = _idx_to_addr(i)
+        t0 = time.time()
+        for attempt in range(retries + 1):
+            if _double_check(lambda a=addr: _adb_ready(adb, a), cool_down, boot_come_up):
+                print(f"    实例 {i}({addr}) adb 就绪（双重检查通过，用时 {int(time.time() - t0)}s）")
+                break
+            if attempt < retries:
+                print(f"    实例 {i}({addr}) adb 双重检查未过，重拉模拟器（{attempt + 1}/{retries}）")
+                _launch_one(i, package)
+        else:
+            failed.append(i)
+    if failed:
+        raise RuntimeError(f"MuMu 实例 {failed} 的 adb 在重试 {retries} 轮后仍未就绪")
+    print(f"<<< MuMu 实例就绪（adb 可用）：{[_idx_to_addr(i) for i in indices]}")
+    return {i: _idx_to_addr(i) for i in indices}
 
 
 def _shutdown_one(idx, retries=2):
@@ -430,6 +441,151 @@ def _role_indices(roles):
             raise RuntimeError(f"{role} 端口 {port} 与 MuMu 实例 {index} 的 adb_port {d['adb_port']} 不一致")
         out[role] = index
     return out
+
+
+# ---------------- adb 直连：游戏进程探测/拉起（ensure_process 用）----------------
+# 这一组 helper 绕开 MaaFw，直接用 MuMu 自带 adb 与设备 shell 交互。用于在交给 Maa 的
+# start 之前，由 Python 侧显式确认游戏进程存活（ensure_process）。adb.exe 与 MuMuManager
+# 同目录（connect_all 实测路径：.../nx_main/adb.exe）。
+
+
+def _adb_path():
+    """MuMu 自带 adb.exe 路径（与 ``MUMU_MANAGER`` 同目录）。找不到则快速失败。"""
+    p = os.path.join(os.path.dirname(MUMU_MANAGER), "adb.exe")
+    if not os.path.isfile(p):
+        raise RuntimeError(
+            f"找不到 adb.exe：{p}\n"
+            f"请确认 MUMU_MANAGER（{MUMU_MANAGER!r}）所在目录含 adb.exe。")
+    return p
+
+
+def _adb_connect(adb, address, timeout=10):
+    """``adb connect <address>``，幂等。MuMu 是网络设备（127.0.0.1:<port>），``-s`` 操作前需
+    先 connect 注册到 adb server。已连接时 adb 输出 "already connected"，无副作用。"""
+    try:
+        subprocess.run([adb, "connect", address], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=timeout)
+    except Exception as e:
+        print(f"    adb connect {address} 异常（忽略继续）：{e}")
+
+
+def _game_process_alive(adb, address, package=PACKAGE, timeout=8):
+    """游戏进程是否在 ``address`` 设备上存活。
+
+    ``adb -s <addr> shell pidof <package>``：返回 0 且 stdout 非空（有 PID）即存在；
+    pidof 无匹配返回 1、adb 通信失败也非 0——一律按"不存在"处理（交给上层重试）。
+    """
+    try:
+        cp = subprocess.run([adb, "-s", address, "shell", "pidof", package],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=timeout)
+    except Exception:
+        return False
+    return cp.returncode == 0 and bool(cp.stdout.strip())
+
+
+def _start_game_process(adb, address, package=PACKAGE, timeout=15):
+    """``adb monkey`` 拉起游戏进程（启动 launcher activity，无需 activity 名）。
+
+    只起游戏、不动模拟器实例；已运行时把游戏带到前台，安全。失败不抛——ensure_process 的
+    double-check 会再判，必要时进重试。
+    """
+    try:
+        subprocess.run([adb, "-s", address, "shell", "monkey", "-p", package,
+                        "-c", "android.intent.category.LAUNCHER", "1"],
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=timeout)
+    except Exception as e:
+        print(f"    [{address}] monkey 拉起游戏异常（忽略，后续检查兜底）：{e}")
+
+
+def _adb_ready(adb, address, timeout=8):
+    """adb 是否可用（设备已连 + Android 开机完成）—— ensure_instances 的就绪判据。
+
+    MuMu 是网络设备，连接会随 adb server 状态变化/掉线，故每次先 ``adb connect``（幂等，保证
+    连接新鲜），再 ``getprop sys.boot_completed``。返回 ``"1"`` 即设备已连且开机完成（monkey 起
+    游戏需要这个程度）。设备未起 / 未开机 / 连不上都返回 False。
+    """
+    try:
+        subprocess.run([adb, "connect", address], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=timeout)
+        cp = subprocess.run([adb, "-s", address, "shell", "getprop", "sys.boot_completed"],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=timeout)
+    except Exception:
+        return False
+    return cp.returncode == 0 and cp.stdout.strip() == "1"
+
+
+def _wait_for(check, timeout, interval=2):
+    """轮询 ``check()`` 直到返回真或 ``timeout`` 到期。命中返回 True，超时返回 False。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if check():
+            return True
+        time.sleep(interval)
+    return False
+
+
+def _double_check(check, cool_down=10, come_up=60):
+    """双重检查（ensure_instances / ensure_process 共用）。
+
+    检查①：``_wait_for(check, come_up)``——轮询直到命中（容忍模拟器/游戏慢启动）；
+    冷却 ``cool_down`` 秒；检查②：再 ``check()`` 一次——抓"起来又崩 / 闪退"。
+    两次都过才返回 True。崩 / 闪退 / 起不来都隐含在此：检查不过 → 上层重拉。
+    """
+    if not _wait_for(check, come_up):
+        return False
+    time.sleep(cool_down)
+    return check()
+
+
+def _adb_reset(adb, addresses):
+    """清 adb server 的 stale offline 缓存，再 ``connect`` 全部地址（幂等）。"""
+    try:
+        subprocess.run([adb, "kill-server"], capture_output=True, timeout=15)
+        print(f">>> adb kill-server（{adb}）清陈旧 offline 缓存")
+    except Exception as e:
+        print(f"!! adb kill-server 失败（忽略继续）：{e}")
+    time.sleep(0.5)
+    for addr in addresses:
+        _adb_connect(adb, addr)
+
+
+def _idx_to_addr(idx):
+    """MuMu 索引 → adb 地址。MuMu 约定 ``adb_port = 16384 + 32*index``（与 ``_role_indices`` 同公式）。"""
+    return f"127.0.0.1:{16384 + 32 * idx}"
+
+
+def ensure_process(addresses, package=PACKAGE, retries=2, cool_down=10, come_up=40):
+    """在每个地址上确保游戏进程已启动（**交付界面：游戏进程存活**，建立在 ensure_instances 之上）。
+
+    每个地址：不在则 ``monkey`` 拉起 → 双重检查（检查①轮询到 pidof 命中 ≤``come_up`` →
+    冷却 ``cool_down`` → 检查② pidof）。任一未过即重新 monkey，``retries`` 轮仍不过则 raise。
+
+    背景：实测 ``control launch -pkg`` 在本环境**不能可靠起游戏**（120s 未起），monkey 才是可靠
+    手段（~2s）。闪退隐含在 double-check 失败 → 重新 monkey。
+    """
+    adb = _adb_path()
+    _adb_reset(adb, addresses)
+    print(f">>> 逐台双重检查游戏进程（cool_down={cool_down}s, come_up={come_up}s）")
+    failed = []
+    for addr in addresses:
+        t0 = time.time()
+        for attempt in range(retries + 1):
+            if not _game_process_alive(adb, addr, package):
+                print(f"    [{addr}] 游戏进程不存在，monkey 拉起")
+                _start_game_process(adb, addr, package)
+            if _double_check(lambda a=addr: _game_process_alive(adb, a, package), cool_down, come_up):
+                print(f"    [{addr}] 游戏进程就绪（双重检查通过，用时 {int(time.time() - t0)}s）")
+                break
+            if attempt < retries:
+                print(f"    [{addr}] 游戏进程双重检查未过，重新 monkey（{attempt + 1}/{retries}）")
+        else:
+            failed.append(addr)
+    if failed:
+        raise RuntimeError(f"游戏进程在 {failed} 上重试 {retries} 轮仍未就绪")
+    print(f"<<< 游戏进程就绪：{list(addresses)}")
 
 
 def connect_all(roles, package=PACKAGE):
@@ -758,7 +914,12 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
     # ``control launch -pkg`` 拉起并自动开游戏）
     role_idx = _role_indices(roles)
     print("=== 启动/检查 MuMu 实例 ===")
-    ensure_instances(sorted(role_idx.values()), package=package, timeout=timeouts["start"])
+    ensure_instances(sorted(role_idx.values()), package=package)
+
+    # 在交给 Maa 的 start 之前，由 Python 侧显式确认游戏进程稳态存活（双重检查 + 重试）。
+    # ensure_instances 的 -pkg 虽顺带拉游戏，但不保证进程稳定；这里 adb 兜底，缺一台即中止整轮。
+    print("=== 确认游戏进程存活（双重检查 + 重试）===")
+    ensure_process(list(roles.values()), package=package)
 
     print("=== 连接 5 设备（共享 Resource）===")
     taskers = connect_all(roles, package=package)
