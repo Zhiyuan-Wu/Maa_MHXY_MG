@@ -101,7 +101,7 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
     "zhuagui": 14400,      # 队长无限捉鬼的墙钟安全帽（4h）；实际靠 Ctrl+C 停，到点 post_stop 收口
 }
 SOLO_ENTRIES = ["shuangbei", "fuli_qiandao", "shimen_renwu", "yunbiao_renwu2", "baotu_renwu", "wabaotu_qingli",
-                "mijing_renwu", "sanjieqiyuan", "huoyue_lingqu", "zhengli_baibao", "jiayuan_zhengli", "huoli"]
+                "mijing_renwu", "sanjieqiyuan", "huoyue_lingqu", "zhengli_baibao", "chushoushanghui", "jiayuan_zhengli", "huoli"]
 if datetime.now().weekday() < 6:
     SOLO_ENTRIES.append("kejuxiangshi")
 
@@ -999,14 +999,24 @@ if __name__ == "__main__":
         # 关键诊断信号：若输出里【看不到】下面这行，说明进程是被 native 崩溃（段错误/abort）
         # 直接杀掉的，Python 的 except/finally 都跑不到——此时去 stderr 找 faulthandler 打的栈。
         #
-        # 强制 os._exit：MaaFw 的 C++ 后台线程（Toolkit / 残留 Resource）可能阻塞 Python 解释器
-        # 正常退出，导致子进程吊着不退、父进程（autolife）读 stdout 的循环卡死直到 wait_for 超时
-        # （本就是这次"4 小时才报超时"的根因）。os._exit 跳过线程 join / atexit，保证父进程立刻
-        # 拿到 EOF；日志已逐行 flush（_log_print flush=True + 文件行缓冲），不会丢。
+        # 强制 TerminateProcess（**不是** os._exit！）：Windows 上 os._exit → ExitProcess 仍会跑
+        # DLL_PROCESS_DETACH，而 MaaFw/onnxruntime 这类带后台线程的 native 库的 detach 会卡住，
+        # 导致进程吊着不真死、仍持有自己的 stdout 管道 → 父进程（autolife）的 stdout 读永远等不到
+        # EOF → 撑到 4h wait_for 超时（这就是上次"4 小时才报超时"的真根因）。
+        # TerminateProcess 直接结束进程、跳过 DLL detach：进程瞬死、句柄全释放、父进程立刻拿 EOF。
+        # 日志已逐行 flush（_log_print flush=True + 文件行缓冲），不会丢；MaaFw 的 Python 级资源
+        # 已在上游 taskers.clear()+gc.collect() 释放过，跳过 detach 不漏。
         if _LOG_FILE is not None:
             try:
                 _LOG_FILE.flush()
             except Exception:
                 pass
-        print("=== main 结束，os._exit 强制退出子进程 ===")
-        os._exit(_exit_code)
+        print("=== main 结束，TerminateProcess 强杀进程（跳过 DLL detach）===")
+        try:
+            import ctypes
+            _k32 = ctypes.windll.kernel32
+            _k32.GetCurrentProcess.restype = ctypes.c_void_p
+            _k32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            _k32.TerminateProcess(_k32.GetCurrentProcess(), _exit_code)
+        except Exception:
+            os._exit(_exit_code)   # ctypes 失败兜底（理论上到不了这里）
