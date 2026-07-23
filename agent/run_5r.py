@@ -101,7 +101,7 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
     "zhuagui": 14400,      # 队长无限捉鬼的墙钟安全帽（4h）；实际靠 Ctrl+C 停，到点 post_stop 收口
 }
 SOLO_ENTRIES = ["shuangbei", "fuli_qiandao", "shimen_renwu", "yunbiao_renwu2", "baotu_renwu", "wabaotu_qingli", "打开大地图_69副本",
-                "mijing_renwu", "打开大地图_69副本", "sanjieqiyuan", "huoyue_lingqu", "zhengli_baibao", "chushoushanghui", "jiayuan_zhengli", "huoli"]
+                "mijing_renwu", "打开大地图_69副本", "sanjieqiyuan", "huoyue_lingqu", "zhengli_baibao", "jiayuan_zhengli", "huoli"]
 if datetime.now().weekday() < 6:
     SOLO_ENTRIES.append("kejuxiangshi")
 
@@ -146,7 +146,7 @@ DEFAULT_OVERRIDES = {
         "使用红罗羹": {"enabled": True}, "使用绿芦羹": {"enabled": True},
         "使用心魔宝珠": {"enabled": True}, "合成阵法": {"enabled": True},
         "使用秘境材料": {"enabled": True}, "使用过期物品": {"enabled": True},
-        # "出售百炼精铁": {"enabled": True}, "出售制造书": {"enabled": True},
+        "出售百炼精铁": {"enabled": True}, "出售制造书": {"enabled": True},
     },
     "jiayuan_zhengli": {
         "点击管家寻路": {"next": ["卧室-点击打理", "[JumpBack]panduan_zhujiemian"]},
