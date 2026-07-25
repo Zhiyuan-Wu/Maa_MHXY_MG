@@ -102,6 +102,7 @@
             791,
             200
         ],
+        "green_mask": true,
         "action": "ClickKey",
         "post_wait_freezes": 200,
         "key": [

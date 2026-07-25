@@ -30,7 +30,7 @@
         ]
     },
     "人物界面-按键打开失败-点击图标": {
-        "max_hit": 5,
+        "max_hit": 1,
         "action": "Click",
         "target": [
             1185,
