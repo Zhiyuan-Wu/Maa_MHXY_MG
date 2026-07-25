@@ -141,6 +141,7 @@ DEFAULT_OVERRIDES = {
     "mijing_renwu": {
         "秘境降妖-选择模式": {"next": ["秘境降妖-选择海底秘境"]},
         "海底秘境-指定关卡结束任务": {"expected": ["第25关", "第26关", "第27关", "第28关", "第29关", "第30关"]},
+        "秘境-点击进入战斗前重新确认关卡数": {"expected": ["第25关", "第26关", "第27关", "第28关", "第29关", "第30关"]},
     },
     "zhengli_baibao": {
         "使用红罗羹": {"enabled": True}, "使用绿芦羹": {"enabled": True},
@@ -639,11 +640,51 @@ def connect_all(roles, package=PACKAGE):
     return taskers
 
 
+def _save_timeout_screenshot(tasker, label):
+    """超时收口时抓一张当前画面存盘（``debug/debug/timeout/<时间戳>_<label>.png``）。
+
+    为什么需要：MaaFw 的 on_error 截图只在 pipeline **命中 on_error 节点**时落盘；而墙钟
+    超时是被 ``post_stop`` 强停的——若任务卡在兜底循环（如 shimen 点完"去完成"后空转
+    ``issub_sleep``、从未触发 on_error），就**完全没有截图留存**，事后无法定位"卡在哪一帧"。
+    本函数在 stop 之后主动 ``controller.post_screencap`` 补一张。
+
+    顺序：先 ``post_stop``（停 pipeline job，释放 controller 截图通道）再截图——避免与正在
+    跑的 pipeline 抢截图。stop 不触发游戏点击，画面 ≈ 超时瞬间（差 <1s）。
+
+    MaaFw 截图返回 **BGR** ndarray（见 ``maa/buffer.py::ImageBuffer`` 注释，与 OpenCV 兼容）；
+    本环境无 cv2，用 PIL 存图，故先 ``img[:,:,::-1]`` 翻成 RGB，否则红蓝反转。
+
+    失败只打一行日志、不抛——超时本就要 return False 收口，截图是尽力而为。
+    """
+    try:
+        ctrl = tasker.controller
+        img = ctrl.post_screencap().wait().result   # BGR ndarray（可能 None / 空）
+        if img is None or getattr(img, "size", 0) == 0:
+            print(f"    （超时截图：空图像，跳过 [{label}]）")
+            return
+        from PIL import Image
+        safe = "".join(c if (c.isalnum() or c in "._-") else "_" for c in label)
+        while "__" in safe:   # 折叠连续下划线（label 开头的 "[ " 等）+ 去首尾
+            safe = safe.replace("__", "_")
+        safe = safe.strip("_")
+        ts = datetime.now().strftime("%Y.%m.%d-%H.%M.%S")
+        out_dir = os.path.join(DEBUG_DIR, "debug", "timeout")
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"{ts}_{safe}.png")
+        Image.fromarray(img[:, :, ::-1]).save(path)   # BGR → RGB
+        print(f"    （超时截图已存：{path}）")
+    except Exception as e:
+        print(f"    （超时截图失败，忽略 [{label}]：{e}）")
+
+
 def run_task(tasker, entry, override=None, timeout=600, label=None):
     """跑一个**原生** entry，带墙钟超时：超时则 ``post_stop`` 中断。返回是否在超时内完成。
 
     自动合并 ``DEFAULT_OVERRIDES`` 里的项目建议默认值（如运镖跳过活力检测）。
     调用方显式传的同名 node override 优先。
+
+    超时收口时顺带抓一张当前画面存盘（``_save_timeout_screenshot``）——墙钟超时被 stop 强停
+    不触发 pipeline 的 on_error 截图，补一张便于事后定位"卡在哪一帧"。
     """
     label = label or entry
     ov = dict(override or {})
@@ -661,6 +702,7 @@ def run_task(tasker, entry, override=None, timeout=600, label=None):
             return True
         time.sleep(1)
     tasker.post_stop().wait()
+    _save_timeout_screenshot(tasker, label)  # stop 后补一张超时截图（兜底循环不触发 on_error 的场景必备）
     print(f"!!! {label} 超时 {timeout}s，已 stop")
     return False
 
