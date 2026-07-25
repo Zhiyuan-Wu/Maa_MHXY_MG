@@ -58,6 +58,22 @@ faulthandler.enable(all_threads=True)
 # 仓库根目录（须含 assets/ agent/）。脚本可放在任意位置——移走后只改这一行。
 REPO_DIR = r"C:\dev\Maa_MHXY_MG"
 
+
+def _load_dotenv():
+    """从 REPO_DIR/.env 读 KEY=VALUE 写入 os.environ（setdefault 不覆盖已有）。免装 python-dotenv。"""
+    _p = os.path.join(REPO_DIR, ".env")
+    if not os.path.isfile(_p):
+        return
+    for _line in open(_p, encoding="utf-8"):
+        _line = _line.strip()
+        if not _line or _line.startswith("#") or "=" not in _line:
+            continue
+        _k, _v = _line.split("=", 1)
+        os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+
+
+_load_dotenv()   # 读 .env（如 OPENAI_KEY）→ os.environ，供 KEJU_AI 等配置引用
+
 # 五开角色 → MuMu 实例 ADB 地址。MuMu12 约定 adb_port = 16384 + 32*index，
 # 故 index = (port - 16384) // 32；ROLES 的顺序即账号编号顺序（solo --ids 用，从 1 起）。
 ROLES = {
@@ -106,17 +122,14 @@ if datetime.now().weekday() < 6:
     SOLO_ENTRIES.append("kejuxiangshi")
 
 # 科举乡试 AI 答题凭证（对应 interface.json「是否使用Ai进行答题=Yes」）。
-# 这里接的是 100.116.176.34 上的 Ollama（Tailscale 内网）。**url 必须用原生 /api/chat**——
-# AIAnswer 据此走 Ollama 原生协议 + think:false 关掉 qwen3 系列的思考；OpenAI 兼容的 /v1 端点
-# 无法关思考，会把 max_tokens 吃光、content 返回空（详见 AIAnswer.py 注释）。
-# 已连通性测试通过：qwen3.5:4b-mlx + think:false → 单 token 直出答案（~1.6s/题）。
-# apikey 任意非空即可（Ollama 不校验；这里的值只为触发下方 DEFAULT_OVERRIDES 的 keju 分支）。
-# 想改用智谱（zai-sdk，仅需 apikey）：把 DEFAULT_OVERRIDES 里 kejuxiangshi 的
-# 「活动-科举乡试-开始答题API」换成「活动-科举乡试-开始答题agent-智谱」，attach 只留 apikey。
+# 用 deepseek（openai 兼容端点）。apikey 从 .env 的 OPENAI_KEY 读（_load_dotenv 已加载进 os.environ）。
+# 关思考固定 thinking:{type:disabled}（AIAnswer._ask_with_openai 内，deepseek 实测 ~1s/题、1 token 直出）。
+# 不再支持 ollama——其关思考写法（reasoning_effort:none）与 deepseek（thinking:disabled）不兼容，
+# 要同时支持须探测，违背极简；故放弃 ollama、统一用 deepseek。详见 memory ollama-qwen3-thinking-disable。
 KEJU_AI = {
-    "apikey": "ollama",
-    "url": "http://100.116.176.34:11434/api/chat",
-    "model": "qwen3.5:4b-mlx",
+    "apikey": os.environ.get("OPENAI_KEY", ""),
+    "url": "https://api.deepseek.com",
+    "model": "deepseek-v4-flash",
 }
 # =========================================================================
 # 以下为派生路径与内部常量，一般无需修改
