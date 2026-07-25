@@ -1,482 +1,195 @@
 from maa.agent.agent_server import AgentServer
-from maa.custom_recognition  import CustomRecognition
+from maa.custom_recognition import CustomRecognition
 from maa.context import Context
 from utils import logger
-import requests
+import difflib
 import json
+import os
+import re
+import threading
 import time
-from zai import ZhipuAiClient
+import httpx
+from datetime import datetime
+from openai import OpenAI
+
+_CACHE_PATH = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", "keju_ai_cache.json"))
+_CACHE_LOCK = threading.Lock()
+_PUNCT_RE = re.compile(r"[\s\t\r\n]|[，,、。！？?!：:；;“”\"'（）()【】\[\]\-·—…]")
+_ANSWER_BOXES = {"A": [509,306,269,91], "B": [825,304,270,95], "C": [506,408,268,88], "D": [831,404,265,96]}
+
+
+def _norm(s):
+    return _PUNCT_RE.sub("", (s or "").lower())
+
+
+def _cache_load():
+    try:
+        with open(_CACHE_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def _cache_save(cache):
+    os.makedirs(os.path.dirname(_CACHE_PATH), exist_ok=True)
+    tmp = _CACHE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _CACHE_PATH)
+
+
+def _find_letter(answer_text, options):
+    na = _norm(answer_text)
+    if not na:
+        return None
+    for letter, text in options.items():
+        if text and _norm(text) == na:
+            return letter
+    return None
+
+
+def _cache_lookup(question, options):
+    nq = _norm(question)
+    if not nq:
+        return None
+    with _CACHE_LOCK:
+        cache = _cache_load()
+    letter = _find_letter((cache.get(nq) or {}).get("answer", ""), options)
+    if letter:
+        return letter
+    best_q, best_ratio = None, 0.0
+    for q in cache:
+        r = difflib.SequenceMatcher(None, nq, q).ratio()
+        if r > best_ratio:
+            best_ratio, best_q = r, q
+    if best_q and best_ratio * 100 >= 80:
+        return _find_letter(cache[best_q].get("answer", ""), options)
+    return None
+
+
+def _cache_store(question, answer_text):
+    nq = _norm(question)
+    if not nq or not answer_text:
+        return
+    with _CACHE_LOCK:
+        cache = _cache_load()
+        cache[nq] = {"answer": answer_text, "question": question, "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        _cache_save(cache)
+
+
+def _cached_or_ask(question, options, ask):
+    letter = _cache_lookup(question, options)
+    if letter:
+        return letter
+    ai_letter = ask()
+    up = (ai_letter or "").strip().upper()
+    if up in options and options[up]:
+        _cache_store(question, options[up])
+    return ai_letter
+
+
+def _sort_ocr_by_position(ocr_results):
+    rows = {}
+    for result in ocr_results:
+        y = result.box[1]
+        for row_y in rows:
+            if abs(y - row_y) < 20:
+                rows[row_y].append(result)
+                break
+        else:
+            rows[y] = [result]
+    for row_y in rows:
+        rows[row_y].sort(key=lambda r: r.box[0])
+    out = []
+    for row_y in sorted(rows):
+        out.extend(rows[row_y])
+    return out
+
+
+def _ocr_question(context):
+    image1 = context.tasker.controller.post_screencap().wait().get()
+    reco = context.run_recognition("科举乡试题目", image1,
+        pipeline_override={"科举乡试题目": {"roi": [511,186,602,107], "expected": [""], "recognition": "OCR"}})
+    if not reco or not reco.hit:
+        return image1, None
+    return image1, "".join(t.text for t in _sort_ocr_by_position(reco.all_results) if t.text)
+
+
+def _ocr_option(context, image, node, roi):
+    r = context.run_recognition(node, image, pipeline_override={node: {"roi": roi, "expected": [""], "recognition": "OCR"}})
+    return r.all_results[-1].text if (r and r.all_results) else ""
+
+
+def _read_options(context, image):
+    return {
+        "A": _ocr_option(context, image, "科举乡试答案a", [509,306,269,91]),
+        "B": _ocr_option(context, image, "科举乡试答案b", [825,304,270,95]),
+        "C": _ocr_option(context, image, "科举乡试答案c", [506,408,268,88]),
+        "D": _ocr_option(context, image, "科举乡试答案d", [831,404,265,96]),
+    }
+
+
+def _click_answer(context, list_answer, question, answer):
+    up = (list_answer or "").strip().upper()
+    if up not in _ANSWER_BOXES:
+        logger.info(f"ai返回值有问题：{list_answer}，默认选择第a答案")
+        up = "A"
+    box = _ANSWER_BOXES[up]
+    nc = context.clone()
+    nc.tasker.controller.post_click(box[0] + box[2] // 2, box[1] + box[3] // 2).wait()
+    logger.info(f"AI返回答案：{list_answer}。识别题目：{question}，识别答案列表：{answer}")
+    time.sleep(2)
+
+
+def _ask_with_openai(base_url, api_key, model, question, options):
+    valid = {k: v for k, v in options.items() if v}
+    if not valid:
+        return "错误：没有有效的选项"
+    prompt = f"问题：{question}\n请从以下选项中选择一个最正确的答案，并只返回选项的字母（例如：A, B, C, D）。\n"
+    for k, v in valid.items():
+        prompt += f"{k}: {v}\n"
+    client = OpenAI(base_url=base_url, api_key=api_key or "ollama",
+                   http_client=httpx.Client(trust_env=False, timeout=120), max_retries=0)
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": "You are a helpful assistant."},
+                      {"role": "user", "content": prompt}],
+            max_tokens=50, stream=False, extra_body={"thinking": {"type": "disabled"}},
+        )
+        content = (resp.choices[0].message.content or "").strip().upper()
+        for ch in content:
+            if ch in valid:
+                return ch
+        return f"AI回复无效: {content}"
+    except Exception as e:
+        return f"请求错误: {e}"
+
 
 @AgentServer.custom_recognition("AIAnswer")
 class AIAnswer(CustomRecognition):
-        def analyze(
-         self,
-         context: Context,
-         argv: CustomRecognition.AnalyzeArg,
-     ) -> CustomRecognition.AnalyzeResult:
-            # logger.info("进入AIAnswer")
-            # 对问题进行排序
-            def sort_ocr_results_by_position(ocr_results):
-                # 定义行高阈值，如果两个框的y坐标差距小于这个值，认为它们在同一行
-                row_height_threshold = 20
-                
-                # 按y坐标分组（将接近的y坐标视为同一行）
-                rows = {}
-                for result in ocr_results:
-                    y = result.box[1]  # y坐标
-                    assigned = False
-                    
-                    # 检查是否可以分配到现有行
-                    for row_y in rows.keys():
-                        if abs(y - row_y) < row_height_threshold:
-                            rows[row_y].append(result)
-                            assigned = True
-                            break
-                    
-                    # 如果不能分配到现有行，创建新行
-                    if not assigned:
-                        rows[y] = [result]
-                
-                # 对每一行内的元素按x坐标排序
-                for row_y in rows:
-                    rows[row_y].sort(key=lambda r: r.box[0])
-                
-                # 按y坐标对行进行排序，并将所有结果合并到一个列表中
-                sorted_results = []
-                for row_y in sorted(rows.keys()):
-                    sorted_results.extend(rows[row_y])
-                
-                return sorted_results
+    def analyze(self, context: Context, argv: CustomRecognition.AnalyzeArg) -> CustomRecognition.AnalyzeResult:
+        image1, question = _ocr_question(context)
+        if question is None:
+            return CustomRecognition.AnalyzeResult(box=(0,0,0,0), detail="答题结束")
+        answer = _read_options(context, image1)
+        attach = context.get_node_data("活动-科举乡试-开始答题API")["attach"]
+        listAnswer = _cached_or_ask(question, answer,
+            lambda: _ask_with_openai(attach["url"], attach["apikey"], attach["model"], question, answer))
+        _click_answer(context, listAnswer, question, answer)
+        return CustomRecognition.AnalyzeResult(box=(0,0,0,0), detail="ai答题完成")
 
-            # 获取界面图片
-            image1 = context.tasker.controller.post_screencap().wait().get()
-            reco_detail = context.run_recognition(
-                            "科举乡试题目",
-                            image1,
-                            
-                            pipeline_override={"科举乡试题目": {"roi" : [511,186,602,107],
-                                                                "expected":[""],
-                                                                "recognition": "OCR"
-                                                                }
-                                                }
-                            )
-            # 没有识别到科举乡试题目
-            if not reco_detail or not reco_detail.hit:
-                # logger.info("没有识别到科举乡试题目")
-                # logger.info(f"未在题库中搜索到答案次数:{NotAnswerCount}，请反馈开发者填充题库。")
-                return CustomRecognition.AnalyzeResult(box=(0,0,0,0),detail="答题结束")
-            all_results= reco_detail.all_results
-            #按照box进行排序
-            sorted_results= sort_ocr_results_by_position(all_results)
-            #整合科举乡试题目
-            question=''
-            for item in sorted_results:
-                if item.text!='':
-                    question+=item.text
-            # logger.info(f"question:{question}")
-            
-            # 获取答案
-            A= ""
-            B= ""
-            C= ""
-            D= ""
-            #科举乡试答案a
-            reco_detail_A=context.run_recognition(
-                            "科举乡试答案a",
-                            image1,
-                            pipeline_override={"科举乡试答案a": {"roi" : [509,306,269,91],
-                                                                "expected":[""],
-                                                                "recognition": "OCR"
-                                                                }
-                                                }
-                            )
-            # logger.info(f"reco_detail_A:{reco_detail_A}")
-            for res in reco_detail_A.all_results:
-                A =res.text
-                # logger.info(f"A:{A}")
-            
-            #科举乡试答案b
-            reco_detail_B=context.run_recognition(
-                            "科举乡试答案b",
-                            image1,
-                            pipeline_override={"科举乡试答案b": {"roi" : [825,304,270,95],
-                                                                "expected":[""],
-                                                                "recognition": "OCR"
-                                                                }
-                                                }
-                            )
-            for res in reco_detail_B.all_results:
-                B =res.text
-                # logger.info(f"B:{B}")
-            
-            #科举乡试答案c
-            reco_detail_C=context.run_recognition(
-                            "科举乡试答案c",
-                            image1,
-                            pipeline_override={"科举乡试答案c": {"roi" : [506,408,268,88],
-                                                                "expected":[""],
-                                                                "recognition": "OCR"
-                                                                }
-                                                }
-                            )
-            if reco_detail_C and reco_detail_C.hit:
-                for res in reco_detail_C.all_results:
-                    C =res.text
-                    # logger.info(f"C:{C}")
-            
-            # 科举乡试答案d
-            reco_detail_D=context.run_recognition(
-                            "科举乡试答案d",
-                            image1,
-                            pipeline_override={"科举乡试答案d": {"roi" : [831,404,265,96],
-                                                                "expected":[""],
-                                                                "recognition": "OCR"
-                                                                }
-                                                }
-                            )
-            if reco_detail_D and reco_detail_D.hit:
-                for res in reco_detail_D.all_results:
-                    D =res.text
-                    # logger.info(f"D:{D}")
-            
-            answer = {"A":A,
-                      "B":B,
-                      "C":C,
-                      "D":D}
-            # logger.info(f"问题为：{question}")
-            # logger.info(f"答案为：{answer}")
-            # 获取传参节点apikey数据
-            # UIpiKey: dict = context.get_node_data("AIapikey")['recognition']['param']['custom_recognition_param']['apikey']
-            UIpiKey: dict = context.get_node_data("活动-科举乡试-开始答题API")["attach"]["apikey"]
-            UIurl:dict = context.get_node_data("活动-科举乡试-开始答题API")["attach"]["url"]
-            UImodel:dict = context.get_node_data("活动-科举乡试-开始答题API")["attach"]["model"]
-            # logger.info(f"用户输入的aikey: {data1}")
-            # 向ai发送问题及答案并获得正确答案
-            def get_ai_answer(question, answers):
-                # 过滤掉值为空的答案
-                valid_answers = {k: v for k, v in answers.items() if v}
-                
-                # 构建 prompt
-                prompt = f"问题：{question}\n"
-                prompt += "请从以下选项中选择一个最正确的答案，并只返回选项的字母（例如：A, B, C, D）。\n"
-                for key, value in valid_answers.items():
-                    prompt += f"{key}: {value}\n"
 
-                # 同时支持 OpenAI 兼容 /v1/chat/completions 与 Ollama 原生 /api/chat。
-                url = UIurl
-                apiKey = UIpiKey
-                # Ollama 必须走原生 /api/chat + think:false 才能关掉 qwen3 系列的思考；
-                # /v1 端点会忽略 think 字段，思考会把 max_tokens 吃光、content 返回空。
-                is_ollama_native = url.rstrip("/").endswith("/api/chat")
-
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {apiKey}"
-                }
-
-                messages = [
-                    {"role": "system", "content": "You are a helpful assistant."},
-                    {"role": "user", "content": prompt},
-                ]
-                if is_ollama_native:
-                    # Ollama 原生端点：think:false 关思考；不要带 max_tokens（关了思考后答案就 1 个 token）。
-                    data = {"model": UImodel, "messages": messages, "stream": False, "think": False}
-                else:
-                    # OpenAI 兼容端点：保留原行为。
-                    data = {
-                        "model": UImodel,
-                        "messages": messages,
-                        "thinking": {"type": "disabled"},
-                        "temperature": 0.7,
-                        "max_tokens": 10,
-                        "stream": False,
-                    }
-
-                try:
-                    response = requests.post(url, headers=headers, data=json.dumps(data))
-                    response.raise_for_status()  # 如果请求失败，则引发HTTPError
-
-                    # 解析AI的回复（两种端点的响应结构不同）
-                    ai_response = response.json()
-                    content = (ai_response["message"]["content"]
-                               if is_ollama_native
-                               else ai_response["choices"][0]["message"]["content"])
-                    ai_answer = content.strip().upper()
-
-                    # 验证AI的回复
-                    if ai_answer in valid_answers:
-                        return ai_answer
-                    else:
-                        # 如果回复不在ABCD中，留下注释
-                        return f"AI回复无效: {ai_answer}"
-
-                except requests.exceptions.RequestException as e:
-                    return f"请求错误: {e}"
-                except (KeyError, IndexError) as e:
-                    return f"解析回复时出错: {e}"
-            listAnswer= get_ai_answer(question,answer)
-            # logger.info(f"listAnswer为：{listAnswer}")
-            # 点击box中心位置
-            def clickBox(box):
-                new_context = context.clone()
-                center_x = box[0] + box[2] // 2
-                center_y = box[1] + box[3] // 2 
-                time.sleep(2)
-                click_job = new_context.tasker.controller.post_click(center_x, center_y)
-                click_job.wait()  # 等待点击操作完成
-                # 向用户ui界面输出日志info
-                logger.info(f"AI返回答案：{listAnswer}。识别题目：{question}，识别答案列表：{answer}")
-                time.sleep(2)
-            if listAnswer =="A" or listAnswer == "a":
-                abox=[509,306,269,91]
-                clickBox(abox)
-            elif listAnswer =="B" or listAnswer == "b":
-                bbox=[825,304,270,95]
-                clickBox(bbox)
-            elif listAnswer =="C" or listAnswer == "c":
-                cbox= [506,408,268,88]
-                clickBox(cbox)
-            elif listAnswer =="D" or listAnswer == "d":
-                dbox= [831,404,265,96]
-                clickBox(dbox)
-            else:
-                logger.info(f"ai返回值有问题：{listAnswer}，默认选择第a答案")
-                abox=[509,306,269,91]
-                clickBox(abox)
-            return CustomRecognition.AnalyzeResult(box=(0,0,0,0),detail="ai答题完成")
-
-@AgentServer.custom_recognition("zhipu")     
+@AgentServer.custom_recognition("zhipu")
 class zhipu(CustomRecognition):
-    def analyze(
-         self,
-         context: Context,
-         argv: CustomRecognition.AnalyzeArg,
-     ) -> CustomRecognition.AnalyzeResult:
-        logger.info("进入zhipu")
-
-        def sort_ocr_results_by_position(ocr_results):
-            # 定义行高阈值，如果两个框的y坐标差距小于这个值，认为它们在同一行
-            row_height_threshold = 20
-            
-            # 按y坐标分组（将接近的y坐标视为同一行）
-            rows = {}
-            for result in ocr_results:
-                y = result.box[1]  # y坐标
-                assigned = False
-                
-                # 检查是否可以分配到现有行
-                for row_y in rows.keys():
-                    if abs(y - row_y) < row_height_threshold:
-                        rows[row_y].append(result)
-                        assigned = True
-                        break
-                
-                # 如果不能分配到现有行，创建新行
-                if not assigned:
-                    rows[y] = [result]
-            
-            # 对每一行内的元素按x坐标排序
-            for row_y in rows:
-                rows[row_y].sort(key=lambda r: r.box[0])
-            
-            # 按y坐标对行进行排序，并将所有结果合并到一个列表中
-            sorted_results = []
-            for row_y in sorted(rows.keys()):
-                sorted_results.extend(rows[row_y])
-            
-            return sorted_results
-        
-        # 获取界面图片
-        image1 = context.tasker.controller.post_screencap().wait().get()
-        reco_detail = context.run_recognition(
-                        "科举乡试题目",
-                        image1,
-                        pipeline_override={"科举乡试题目": {"roi" : [511,186,602,107],
-                                                            "expected":[""],
-                                                            "recognition": "OCR"
-                                                            }
-                                            }
-                        )
-        # 没有识别到科举乡试题目
-        if not reco_detail or not reco_detail.hit:
-            # logger.info("没有识别到科举乡试题目")
-            # logger.info(f"未在题库中搜索到答案次数:{NotAnswerCount}，请反馈开发者填充题库。")
-            return CustomRecognition.AnalyzeResult(box=(0,0,0,0),detail="答题结束")
-        all_results= reco_detail.all_results
-        #按照box进行排序
-        sorted_results= sort_ocr_results_by_position(all_results)
-        #整合科举乡试题目
-        question=''
-        for item in sorted_results:
-            if item.text!='':
-                question+=item.text
-        # logger.info(f"question:{question}")
-        
-        # 获取答案
-        A= ""
-        B= ""
-        C= ""
-        D= ""
-        #科举乡试答案a
-        reco_detail_A=context.run_recognition(
-                        "科举乡试答案a",
-                        image1,
-                        pipeline_override={"科举乡试答案a": {"roi" : [509,306,269,91],
-                                                            "expected":[""],
-                                                            "recognition": "OCR"
-                                                            }
-                                            }
-                        )
-        # logger.info(f"reco_detail_A:{reco_detail_A}")
-        for res in reco_detail_A.all_results:
-            A =res.text
-            # logger.info(f"A:{A}")
-        
-        #科举乡试答案b
-        reco_detail_B=context.run_recognition(
-                        "科举乡试答案b",
-                        image1,
-                        pipeline_override={"科举乡试答案b": {"roi" : [825,304,270,95],
-                                                            "expected":[""],
-                                                            "recognition": "OCR"
-                                                            }
-                                            }
-                        )
-        for res in reco_detail_B.all_results:
-            B =res.text
-            # logger.info(f"B:{B}")
-        
-        #科举乡试答案c
-        reco_detail_C=context.run_recognition(
-                        "科举乡试答案c",
-                        image1,
-                        pipeline_override={"科举乡试答案c": {"roi" : [506,408,268,88],
-                                                            "expected":[""],
-                                                            "recognition": "OCR"
-                                                            }
-                                            }
-                        )
-        if reco_detail_C and reco_detail_C.hit:
-            for res in reco_detail_C.all_results:
-                C =res.text
-                # logger.info(f"C:{C}")
-        
-        # 科举乡试答案d
-        reco_detail_D=context.run_recognition(
-                        "科举乡试答案d",
-                        image1,
-                        pipeline_override={"科举乡试答案d": {"roi" : [831,404,265,96],
-                                                            "expected":[""],
-                                                            "recognition": "OCR"
-                                                            }
-                                            }
-                        )
-        if reco_detail_D and reco_detail_D.hit:
-            for res in reco_detail_D.all_results:
-                D =res.text
-                # logger.info(f"D:{D}")
-        
-        answer = {"A":A,
-                    "B":B,
-                    "C":C,
-                    "D":D}
-        # logger.info(f"问题为：{question}")
-        # logger.info(f"答案为：{answer}")
-        # 获取传参节点apikey数据
-        uipikey: dict = context.get_node_data("活动-科举乡试-开始答题agent-智谱")["attach"]["apikey"]
-        # logger.info(f"uipikey:{uipikey}")
-        # 调用智谱ai
-        def get_answer_from_zhipu(question, options):
-            """
-            发送问题给智谱AI并获取答案
-            """
-            
-            # 初始化客户端，请替换为您自己的 API Key
-            client = ZhipuAiClient(api_key=uipikey)
-
-            # 构造提示词
-            prompt = f"{question}\n"
-            prompt += "请严格从以下选项中选择一个最合适的答案（只回复字母A、B、C或D）：\n"
-            for key, value in options.items():
-                prompt += f"{key}. {value}\n"
-
-            try:
-                response = client.chat.completions.create(
-                    model="GLM-4-Flash-250414",  # 或其他模型model="glm-4"
-                    messages=[{"role": "user", "content": prompt}],
-                )
-                return response.choices[0].message.content.strip()
-            except Exception as e:
-                print(f"API调用出错: {e}")
-                return None
-
-        # 对结果进行分析并格式化
-        def solve_riddle(question, answers):
-            # 1. 过滤为空的答案
-            valid_answers = {k: v for k, v in answers.items() if v and v.strip()}
-            
-            if not valid_answers:
-                # print("错误：没有有效的选项。")
-                return f"错误：没有有效的选项。"
-
-            # print(f"问题：{question}")
-            # print(f"有效选项：{valid_answers}")
-
-            # 2. 发送请求给AI
-            ai_response = get_answer_from_zhipu(question, valid_answers)
-
-            if ai_response is None:
-                # print("AI未能返回结果。")
-                return f"AI未能返回结果。"
-
-            # print(f"AI原始回复：{ai_response}")
-
-            # 3. 验证AI的回复是否在ABCD中
-            # 提取回复中的字母（防止AI回复 "答案是A" 这种情况）
-            # 这里假设valid_answers的key就是A,B,C,D...
-            valid_keys = valid_answers.keys()
-            
-            # 简单清洗：去除标点和空格，提取首字母
-            cleaned_response = ai_response.strip().upper()
-            
-            # 如果回复是 "A" 或 "选A" 或 "A."，我们尝试提取核心字母
-            final_choice = None
-            for char in cleaned_response:
-                if char in valid_keys:
-                    final_choice = char
-                    break
-                    
-            # 4. 验证逻辑
-            if final_choice:
-                # print(f"最终答案：{final_choice}")
-                return final_choice
-            else:
-                return f"# 注释：AI的回复 '{ai_response}' 不在有效选项 {list(valid_keys)} 中，无法确定答案。"
-        listAnswer= solve_riddle(question,answer)
-        def clickBox(box):
-            new_context = context.clone()
-            center_x = box[0] + box[2] // 2
-            center_y = box[1] + box[3] // 2 
-            time.sleep(2)
-            click_job = new_context.tasker.controller.post_click(center_x, center_y)
-            click_job.wait()  # 等待点击操作完成
-            # 向用户ui界面输出日志info
-            logger.info(f"AI返回答案：{listAnswer}。识别题目：{question}，识别答案列表：{answer}")
-            time.sleep(2)
-        if listAnswer =="A" or listAnswer == "a":
-            abox=[509,306,269,91]
-            clickBox(abox)
-        elif listAnswer =="B" or listAnswer == "b":
-            bbox=[825,304,270,95]
-            clickBox(bbox)
-        elif listAnswer =="C" or listAnswer == "c":
-            cbox= [506,408,268,88]
-            clickBox(cbox)
-        elif listAnswer =="D" or listAnswer == "d":
-            dbox= [831,404,265,96]
-            clickBox(dbox)
-        else:
-            logger.info(f"ai返回值有问题：{listAnswer}，默认选择第a答案")
-            abox=[509,306,269,91]
-            clickBox(abox)
-        return CustomRecognition.AnalyzeResult(box=(0,0,0,0),detail="ai答题完成")
+    def analyze(self, context: Context, argv: CustomRecognition.AnalyzeArg) -> CustomRecognition.AnalyzeResult:
+        image1, question = _ocr_question(context)
+        if question is None:
+            return CustomRecognition.AnalyzeResult(box=(0,0,0,0), detail="答题结束")
+        answer = _read_options(context, image1)
+        uipikey = context.get_node_data("活动-科举乡试-开始答题agent-智谱")["attach"]["apikey"]
+        listAnswer = _cached_or_ask(question, answer, lambda: _ask_with_openai(
+            "https://open.bigmodel.cn/api/paas/v4", uipikey, "GLM-4-Flash-250414", question, answer))
+        _click_answer(context, listAnswer, question, answer)
+        return CustomRecognition.AnalyzeResult(box=(0,0,0,0), detail="ai答题完成")

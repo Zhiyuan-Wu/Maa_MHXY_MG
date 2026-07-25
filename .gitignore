@@ -450,5 +450,8 @@ tools/ImageCropper/**/*.png
 config
 debug
 
-# 答题日志文件
+.env
+
+# 答题运行时数据（搜索日志 / AI 答题缓存：自动累积，不入库）
 agent/custom/recognition/search_log.txt
+agent/data/keju_ai_cache.json
