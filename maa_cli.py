@@ -6,12 +6,13 @@
 做单次截图 / 单次识别 / 单次动作并回显完整结果**的轻量工具——本脚本补这个缺口。
 
 == 两种角色（同一脚本）==
-  1. ``--server``：常驻一个连好游戏窗口的 Tasker（Win32 控制器 + 桌面窗口），开 HTTP 服务。
+  1. ``--server``：常驻一个连好目标的 Tasker（Win32 桌面窗口 **或** ADB 模拟器），加载资源 +
+     注册 custom，开 HTTP 服务。
   2. ``crop`` / ``reco`` / ``action`` / ``windows``：纯 HTTP 客户端，向已启动的 server 发请求，
      拿回完整结果。客户端**不依赖 MaaFw**——对应需求里「在 server 启动后，再次运行脚本 cli」。
 
-控制器口径与 ``shikong.py`` 一致：**Win32 控制器 + 桌面窗口（hwnd）**。「可选指定 id」即可选
-指定窗口句柄 hwnd（或 1-based 序号）。
+控制器两套（``--controller``）：**win32**（默认，桌面窗口 hwnd，口径同 ``shikong.py``，资源=shikong）
+与 **adb**（模拟器，按 ``--address``/``--mumu-idx`` 连，资源=base，含全部 pipeline+custom）。
 
 == HTTP 端点（全部 JSON；出错 HTTP 4xx/5xx + ``{"error":...}``）==
   GET  /windows  重新枚举游戏窗口 → [{index,hwnd,pid,title,rect}]
@@ -28,6 +29,10 @@
   python maa_cli.py --server --hwnd 0x12345       # 指定窗口句柄（int 或 0x 十六进制）
   python maa_cli.py --server --index 2            # 按枚举序号选
   python maa_cli.py --server --port 8080          # 换端口；--resource 换资源（须 Win32 可用，如 shikong）
+
+  # 终端 1（ADB / 模拟器）：controller=adb，默认资源=base（含全部 pipeline + custom）
+  python maa_cli.py --server --controller adb --mumu-idx 4     # MuMu idx4 → 127.0.0.1:16512
+  python maa_cli.py --server --controller adb --address 127.0.0.1:16512
 
   # 终端 2：发请求
   python maa_cli.py windows
@@ -54,8 +59,10 @@ Click/Swipe/ClickKey/InputText/...）。
     （文档原文：KeyDown「按下按键但不立即松开，可与 KeyUp 配合实现自定义按键时序」。）
 
 == 不做（明确范围）==
-  - 不做 ADB/PlayCover 控制器（需求是「窗口」+ hwnd，对应 Win32）。
-  - 不注册 custom 识别/动作（需独立 agent 进程，超出「单次 reco/action」定位）。
+  - 不做 PlayCover 控制器。
+  - **custom 识别/动作已注册**（``_register_customs``，移植自 run_5r）：``/task`` 能跑含自定义动作/
+    识别的 pipeline（如 ``zhanghao_xinxi`` 的 logOcr、运镖 OCRNum、宝图 count）。单次 reco/action
+    不经 custom（直接走原生 OCR/TemplateMatch/Click…）。
   - 不做鉴权/持久化（本地调试工具，监听 127.0.0.1）。
 """
 import argparse
@@ -65,6 +72,7 @@ import dataclasses
 import faulthandler
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -104,6 +112,12 @@ DEBUG_DIR = os.path.join(REPO_DIR, "debug")                                   # 
 # （空节点 / panduan_zhujiemian），故 shikong/pipeline 下已补一份**最小依赖集合**（见 _base_deps.json），
 # 使其能独立通过 PipelineChecker。换回 base 资源在 Win32 下不可用（base 是 ADB/模拟器向）。
 RESOURCE_PATH = os.path.join(REPO_DIR, "assets", "resource", "shikong")
+# 模拟器（ADB）资源——base 是 ADB/模拟器向，含本项目全部 pipeline（含自定义动作 logOcr 等）。
+BASE_RESOURCE_PATH = os.path.join(REPO_DIR, "assets", "resource", "base")
+AGENT_DIR = os.path.join(REPO_DIR, "agent")           # import custom（自定义识别/动作注册）
+# MuMu12 实例 idx → adb 端口约定（同 run_5r.py / 5r 日志排查 SOP）：16384 + 32*idx
+MUMU_PORT_BASE = 16384
+MUMU_PORT_STEP = 32
 WINDOW_TITLE_KEYWORDS = ["梦幻西游"]   # 标题 startswith 任一关键字才算游戏窗口（避免误伤编辑器/终端）
 # Win32 控制方式（取自 interface.json「桌面端1」当前默认：后台可用、不抢鼠标）。合法名见 maa.define：
 #   MaaWin32ScreencapMethodEnum: FramePool / GDI / PrintWindow / ScreenDC / DXGI_* ...
@@ -141,7 +155,7 @@ def _import_maa():
     if _MAA is not None:
         return _MAA
     from maa.toolkit import Toolkit
-    from maa.controller import Win32Controller
+    from maa.controller import Win32Controller, AdbController
     from maa.resource import Resource
     from maa.tasker import Tasker
     from maa.library import Library
@@ -156,8 +170,8 @@ def _import_maa():
         JScroll, JCommand, JShell, JScreencap, JCustomAction,
     )
     _MAA = {
-        "Toolkit": Toolkit, "Win32Controller": Win32Controller, "Resource": Resource,
-        "Tasker": Tasker, "Library": Library,
+        "Toolkit": Toolkit, "Win32Controller": Win32Controller, "AdbController": AdbController,
+        "Resource": Resource, "Tasker": Tasker, "Library": Library,
         "MaaWin32ScreencapMethodEnum": MaaWin32ScreencapMethodEnum,
         "MaaWin32InputMethodEnum": MaaWin32InputMethodEnum, "Rect": Rect, "Point": Point,
         "JRecognitionType": JRecognitionType, "JActionType": JActionType,
@@ -261,6 +275,45 @@ def find_game_windows(keywords=None):
     for i, w in enumerate(out, 1):
         w["index"] = i
     return out
+
+
+# ---------------- 自定义识别/动作注册（standalone / Model B）----------------
+def _register_customs(resource):
+    """把 ``agent/custom/*`` 的自定义识别/动作注册到 Resource（移植自 run_5r.py::_register_customs）。
+
+    本项目 custom 类用 ``@AgentServer.custom_*`` 装饰器（为 GUI 独立 agent 进程设计）。standalone
+    下要让 pipeline 命中 custom 时回调到 Python，必须把装饰器存进 ``AgentServer._custom_*_holder``
+    的实例搬到 **Resource 的 C++ 回调表**（``resource.register_custom_*``）。``import custom`` 会把
+    全局 Library 翻成 AgentServer 模式，import 完须手动翻回 False，否则后续 Resource/Tasker API 会
+    去调 MaaAgentServer.dll（"Not implement"）。详见 run_5r.py::_register_customs 注释。
+    """
+    if AGENT_DIR not in sys.path:
+        sys.path.insert(0, AGENT_DIR)
+    from maa.library import Library
+    import custom  # noqa: E402  触发 @AgentServer.custom_* 装饰器
+    Library._is_agent_server = False   # 翻回 standalone/framework 模式
+    from maa.agent.agent_server import AgentServer
+    recs = list(AgentServer._custom_recognition_holder.items())
+    acts = list(AgentServer._custom_action_holder.items())
+    for name, inst in recs:
+        resource.register_custom_recognition(name, inst)
+    for name, inst in acts:
+        resource.register_custom_action(name, inst)
+    print(f"已注册自定义识别 {len(recs)} 个、自定义动作 {len(acts)} 个")
+
+
+# ---------------- ADB 设备（仅 server 端用）----------------
+def _find_adb_device(address):
+    """按 ``address``（如 ``127.0.0.1:16512``）从 Toolkit 发现的设备里取一台，找不到返回 None。"""
+    Toolkit = _import_maa()["Toolkit"]
+    for d in Toolkit.find_adb_devices():
+        if d.address == address:
+            return d
+    return None
+
+
+def _mumu_port(idx):
+    return MUMU_PORT_BASE + MUMU_PORT_STEP * idx
 
 
 # ---------------- 图像（BGR ndarray ↔ 文件；用 PIL，无 cv2 依赖）----------------
@@ -565,57 +618,93 @@ def _print_window_table(wins):
 
 
 def run_server(hwnd=None, index=None, keywords=None, resource_path=None,
-               screencap=None, mouse=None, keyboard=None, host=None, port=None):
-    """server 主流程：选窗 → 连 Win32 控制器 → 加载资源 → 起 Tasker → 开 HTTP。"""
+               screencap=None, mouse=None, keyboard=None, host=None, port=None,
+               controller="win32", address=None, mumu_idx=None):
+    """server 主流程：选目标 → 连控制器（Win32 窗口 或 ADB 设备）→ 加载资源(+注册 custom) →
+    起 Tasker → 开 HTTP。``controller="win32"`` 走桌面窗口（hwnd）；``"adb"`` 走模拟器（address）。"""
     m = _import_maa()
-    Toolkit, Win32Controller, Resource, Tasker = (m["Toolkit"], m["Win32Controller"],
-                                                   m["Resource"], m["Tasker"])
+    Toolkit, Win32Controller, AdbController, Resource, Tasker = (
+        m["Toolkit"], m["Win32Controller"], m["AdbController"], m["Resource"], m["Tasker"])
     Toolkit.init_option(DEBUG_DIR)
     keywords = keywords if keywords is not None else list(WINDOW_TITLE_KEYWORDS)
-    resource_path = resource_path or RESOURCE_PATH
-    sc = _win32_method_value("screencap", screencap or WIN32_SCREENCAP)
-    ms = _win32_method_value("mouse", mouse or WIN32_MOUSE)
-    kb = _win32_method_value("keyboard", keyboard or WIN32_KEYBOARD)
-    _STATE.update(resource_path=os.path.abspath(resource_path),
-                  win32={"screencap": screencap or WIN32_SCREENCAP,
-                         "mouse": mouse or WIN32_MOUSE,
-                         "keyboard": keyboard or WIN32_KEYBOARD},
-                  keywords=keywords)
+    controller = (controller or "win32").lower()
+    # 默认资源随控制器：adb→base（模拟器向，含全部 pipeline + custom）；win32→shikong（桌面端）
+    if resource_path is None:
+        resource_path = BASE_RESOURCE_PATH if controller == "adb" else RESOURCE_PATH
 
-    # ① 选窗：--hwnd 直接连；否则枚举 + --index/唯一/默认 index=1
-    if hwnd is not None:
-        target_hwnd = int(hwnd)
-        print(f">>> 直接连指定 hwnd={target_hwnd}（0x{target_hwnd:x}）"
-              f" pid={_get_window_pid(target_hwnd)} rect={_get_window_rect(target_hwnd)}")
+    if controller == "adb":
+        # 解析 address：--address 优先；否则由 --mumu-idx 推端口（16384+32*idx）
+        if not address and mumu_idx is not None:
+            address = f"127.0.0.1:{_mumu_port(int(mumu_idx))}"
+        if not address:
+            raise RuntimeError("adb 控制器需要 --address <host:port> 或 --mumu-idx <N>")
+        all_devs = list(Toolkit.find_adb_devices())
+        dev = next((d for d in all_devs if d.address == address), None)
+        if dev is None and all_devs:
+            # address 未直接命中，多半是 adb server 缓存了 offline；kill-server 清缓存后重试（对齐 run_5r）
+            print(f">>> adb kill-server（{all_devs[0].adb_path}）清陈旧 offline 缓存后重试")
+            try:
+                subprocess.run([str(all_devs[0].adb_path), "kill-server"],
+                               capture_output=True, timeout=15)
+            except Exception as _e:
+                print(f"!! adb kill-server 失败（忽略继续）：{_e}")
+            time.sleep(0.5)
+            dev = next((d for d in Toolkit.find_adb_devices() if d.address == address), None)
+        if dev is None:
+            raise RuntimeError(f"未发现 ADB 设备 {address}（确认模拟器已启动、adb 已握手）")
+        print(f">>> AdbController(address={address}, screencap_methods={dev.screencap_methods}, "
+              f"input_methods={dev.input_methods})")
+        ctrl = AdbController(adb_path=str(dev.adb_path), address=dev.address,
+                             screencap_methods=dev.screencap_methods,
+                             input_methods=dev.input_methods, config=dev.config)
+        ctrl.post_connection().wait()
+        if not ctrl.connected:
+            raise RuntimeError(f"ADB 控制器连接失败（{address}）：设备未就绪或截图/输入方式不兼容")
+        _STATE.update(resource_path=os.path.abspath(resource_path), win32={},
+                      adb={"address": address, "mumu_idx": mumu_idx}, keywords=keywords)
     else:
-        wins = find_game_windows(keywords)
-        if not wins:
-            raise RuntimeError(f"未找到标题以 {keywords} 开头的窗口。"
-                               f" 用 --hwnd <句柄> 直接连，或 --title <关键字> 放宽。")
-        if index is not None:
-            match = [w for w in wins if w["index"] == index]
-            if not match:
-                _print_window_table(wins)
-                raise RuntimeError(f"--index {index} 超出范围（共 {len(wins)} 个窗口）")
-            target_hwnd = match[0]["hwnd"]
-            print(f">>> 按序号选中 index={index}：hwnd={target_hwnd} {match[0]['title']}")
-        elif len(wins) == 1:
-            target_hwnd = wins[0]["hwnd"]
-            print(f">>> 仅一个游戏窗口：hwnd={target_hwnd} {wins[0]['title']}")
+        # ---- Win32：选窗 + 连 ----
+        sc = _win32_method_value("screencap", screencap or WIN32_SCREENCAP)
+        ms = _win32_method_value("mouse", mouse or WIN32_MOUSE)
+        kb = _win32_method_value("keyboard", keyboard or WIN32_KEYBOARD)
+        _STATE.update(resource_path=os.path.abspath(resource_path),
+                      win32={"screencap": screencap or WIN32_SCREENCAP,
+                             "mouse": mouse or WIN32_MOUSE,
+                             "keyboard": keyboard or WIN32_KEYBOARD},
+                      adb={}, keywords=keywords)
+        # ① 选窗：--hwnd 直接连；否则枚举 + --index/唯一/默认 index=1
+        if hwnd is not None:
+            target_hwnd = int(hwnd)
+            print(f">>> 直接连指定 hwnd={target_hwnd}（0x{target_hwnd:x}）"
+                  f" pid={_get_window_pid(target_hwnd)} rect={_get_window_rect(target_hwnd)}")
         else:
-            print("!! 发现多个游戏窗口，默认选 index=1（用 --index N 或 --hwnd 另选）：")
-            _print_window_table(wins)
-            target_hwnd = wins[0]["hwnd"]
+            wins = find_game_windows(keywords)
+            if not wins:
+                raise RuntimeError(f"未找到标题以 {keywords} 开头的窗口。"
+                                   f" 用 --hwnd <句柄> 直接连，或 --title <关键字> 放宽。")
+            if index is not None:
+                match = [w for w in wins if w["index"] == index]
+                if not match:
+                    _print_window_table(wins)
+                    raise RuntimeError(f"--index {index} 超出范围（共 {len(wins)} 个窗口）")
+                target_hwnd = match[0]["hwnd"]
+                print(f">>> 按序号选中 index={index}：hwnd={target_hwnd} {match[0]['title']}")
+            elif len(wins) == 1:
+                target_hwnd = wins[0]["hwnd"]
+                print(f">>> 仅一个游戏窗口：hwnd={target_hwnd} {wins[0]['title']}")
+            else:
+                print("!! 发现多个游戏窗口，默认选 index=1（用 --index N 或 --hwnd 另选）：")
+                _print_window_table(wins)
+                target_hwnd = wins[0]["hwnd"]
+        # ② 连 Win32 控制器
+        print(f">>> Win32Controller(hwnd={target_hwnd}, screencap={screencap or WIN32_SCREENCAP}, "
+              f"mouse={mouse or WIN32_MOUSE}, keyboard={keyboard or WIN32_KEYBOARD})")
+        ctrl = Win32Controller(target_hwnd, sc, ms, kb)
+        ctrl.post_connection().wait()
+        if not ctrl.connected:
+            raise RuntimeError("Win32 控制器连接失败（窗口可能已关闭/最小化，或截图方式不兼容）")
 
-    # ② 连 Win32 控制器
-    print(f">>> Win32Controller(hwnd={target_hwnd}, screencap={screencap or WIN32_SCREENCAP}, "
-          f"mouse={mouse or WIN32_MOUSE}, keyboard={keyboard or WIN32_KEYBOARD})")
-    ctrl = Win32Controller(target_hwnd, sc, ms, kb)
-    ctrl.post_connection().wait()
-    if not ctrl.connected:
-        raise RuntimeError("Win32 控制器连接失败（窗口可能已关闭/最小化，或截图方式不兼容）")
-
-    # ③ 加载资源（OCR 模型 + 模板 + pipeline）
+    # ③ 加载资源（OCR 模型 + 模板 + pipeline）+ 注册 custom（让含自定义动作/识别的 pipeline 能跑）
     if not os.path.isdir(resource_path):
         raise RuntimeError(f"资源目录不存在：{resource_path}（用 --resource 指定）")
     print(f">>> 加载资源 {resource_path}")
@@ -623,9 +712,10 @@ def run_server(hwnd=None, index=None, keywords=None, resource_path=None,
     bundle_job = resource.post_bundle(resource_path).wait()
     if not bundle_job.status.succeeded:
         # 资源未通过 PipelineChecker（如节点引用缺失）。reco/action 依赖资源，故直接报错；
-        # 详见 MaaFw 日志（debug/ 目录）。crop 仅需控制器，但本工具定位为 reco/action 调试，统一失败。
+        # 详见 MaaFw 日志（debug/ 目录）。
         raise RuntimeError(f"资源加载失败（post_bundle 未成功）——pipeline 校验未过或模板/模型缺失。"
                            f"检查 MaaFw 日志或换 --resource。path={resource_path}")
+    _register_customs(resource)
 
     # ④ 起 Tasker
     tasker = Tasker()
@@ -641,11 +731,12 @@ def run_server(hwnd=None, index=None, keywords=None, resource_path=None,
     port = port or PORT
     httpd = ThreadingHTTPServer((host, port), _Handler)
     url = f"http://{host}:{port}"
+    target_desc = (f"address={address}" if controller == "adb" else f"hwnd={target_hwnd}")
     print("=" * 60)
-    print(f"<<< 就绪：{len(find_game_windows(keywords))} 个窗口可选；Tasker 已连 hwnd={target_hwnd}")
+    print(f"<<< 就绪：Tasker 已连 {target_desc}（controller={controller}）")
     print(f"    HTTP 服务：{url}")
-    print(f"    另开终端：python maa_cli.py windows  |  crop <path>  |  reco <type> '<json>'  |  action <type> '<json>'")
-    print(f"    （所有 reco/action 经此服务串行执行，单窗口无需并发）")
+    print(f"    另开终端：python maa_cli.py task <entry>  |  crop <path>  |  reco <type> '<json>'  |  action <type> '<json>'")
+    print(f"    （所有 task/reco/action 经此服务串行执行）")
     print("=" * 60)
     try:
         httpd.serve_forever()
@@ -798,6 +889,13 @@ def build_parser():
     ps.add_argument("--keyboard", default=None, help=f"Win32 键盘方式（默认 {WIN32_KEYBOARD}）")
     ps.add_argument("--host", default=None, help=f"监听地址（默认 {HOST}）")
     ps.add_argument("--port", type=int, default=None, help=f"监听端口（默认 {PORT}）")
+    ps.add_argument("--controller", choices=["win32", "adb"], default="win32",
+                    help="控制器：win32=桌面窗口(hwnd)；adb=模拟器(address)。默认 win32")
+    ps.add_argument("--address", default=None,
+                    help="adb 设备地址 host:port（如 127.0.0.1:16512）；controller=adb 时用")
+    ps.add_argument("--mumu-idx", type=int, default=None,
+                    help="MuMu 实例 idx，据此推 adb 端口（16384+32*idx，如 idx=4→16512）；"
+                         "controller=adb 且未给 --address 时用")
 
     pw = sub.add_parser("windows", help="列出游戏窗口")
     _add_client_args(pw)
@@ -846,7 +944,8 @@ def main(argv):
                     if args.title else None)
         run_server(hwnd=args.hwnd, index=args.index, keywords=keywords,
                    resource_path=args.resource, screencap=args.screencap,
-                   mouse=args.mouse, keyboard=args.keyboard, host=args.host, port=args.port)
+                   mouse=args.mouse, keyboard=args.keyboard, host=args.host, port=args.port,
+                   controller=args.controller, address=args.address, mumu_idx=args.mumu_idx)
     else:
         # 客户端：ServerError（server 响应了但报错）/ URLError（连不上）/ 客户端输入错误
         # （JSON 解析失败、@file 找不到等）一律干净提示，不打 traceback；其余意外才走顶层 traceback。

@@ -86,9 +86,9 @@ ROLES = {
 PACKAGE        = "com.netease.my"      # 游戏包名（仓库 start.json 里的 myq 是错的，用这个）
 FUBEN_ENTRY    = "fuben115"            # 组队副本 entry（base 即 全自动 接双侠士路线，无需 option）
 # 副本完成、桥接捉鬼后跑几轮鬼。注意 **实际轮数 = max_hit + 1**：首轮由入口 钟馗-捉鬼任务-循环
-# 启动（不耗计数器），抓鬼轮次计算-max-fuben 在每轮末尾命中一次再启下一轮——故 4 轮对应 max_hit=3。
+# 启动（不耗计数器），抓鬼轮次计算-max 在每轮末尾命中一次再启下一轮——故 4 轮对应 max_hit=3。
 # standalone 的 post_task 不读 interface.json option，base 默认不挂限轮器（抓鬼一轮完成→队伍满员判断
-# 会无限循环），故 team_run 必须显式把 抓鬼一轮完成.next 改写到 抓鬼轮次计算-max-fuben。
+# 会无限循环），故 team_run 必须显式把 抓鬼一轮完成.next 改写到 抓鬼轮次计算-max。
 ZHUOGUI_ROUNDS = 2
 
 # 队长单人无限捉鬼模式的 override（``python run_5r.py zhuagui``）—— 对应 interface.json option
@@ -117,9 +117,9 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
     "zhuagui": 14400,      # 队长无限捉鬼的墙钟安全帽（4h）；实际靠 Ctrl+C 停，到点 post_stop 收口
 }
 SOLO_ENTRIES = ["shuangbei", "fuli_qiandao", "shimen_renwu", "yunbiao_renwu2", "baotu_renwu", "wabaotu_qingli", "打开大地图_69副本",
-                "mijing_renwu", "打开大地图_69副本", "sanjieqiyuan", "huoyue_lingqu", "zhengli_baibao", "jiayuan_zhengli", "huoli"]
-if datetime.now().weekday() < 6:
-    SOLO_ENTRIES.append("kejuxiangshi")
+                "mijing_renwu", "打开大地图_69副本", "sanjieqiyuan", "huoyue_lingqu", "zhengli_baibao", "jiayuan_zhengli", "huoli", "zhanghao_xinxi"]
+if datetime.now().weekday() < 5:
+    SOLO_ENTRIES.insert(0, "kejuxiangshi")
 
 # 科举乡试 AI 答题凭证（对应 interface.json「是否使用Ai进行答题=Yes」）。
 # 用 deepseek（openai 兼容端点）。apikey 从 .env 的 OPENAI_KEY 读（_load_dotenv 已加载进 os.environ）。
@@ -827,8 +827,8 @@ def team_run(taskers, member_names, fuben_entry=FUBEN_ENTRY, timeouts=None):
     然后停掉所有队员并回收全局 ``_TEAM_MEMBER_FUTS`` / ``_MEMBER_POOL``。
 
     ``fuben_entry`` 接 ``ZHUOGUI_ROUNDS`` 轮捉鬼：把 ``抓鬼一轮完成.next`` 改写到
-    ``抓鬼轮次计算-max-fuben``（max_hit = ZHUOGUI_ROUNDS - 1，实际跑 ZHUOGUI_ROUNDS 轮），
-    跑完经 ``捉鬼-fuben结束`` 跳回父节点兜底 ``panduan_zhujiemian``。standalone 不读
+    ``抓鬼轮次计算-max``（max_hit = ZHUOGUI_ROUNDS - 1，实际跑 ZHUOGUI_ROUNDS 轮），
+    跑完 ``捉鬼-结束`` 回主界面后弹栈，副本出口兜底 ``panduan_zhujiemian``（主界面幂等，多跑一次无害）。standalone 不读
     interface.json option，故 base 默认无限循环——必须在此显式接限轮器。
     """
     timeouts = {**TIMEOUTS, **(timeouts or {})}
@@ -837,10 +837,10 @@ def team_run(taskers, member_names, fuben_entry=FUBEN_ENTRY, timeouts=None):
     fuben_override = {
         "抓鬼一轮完成": {"next": [
             "[JumpBack]抓鬼一轮完成-再次点击确定",
-            "抓鬼轮次计算-max-fuben",
-            "捉鬼-fuben结束",
+            "抓鬼轮次计算-max",
+            "捉鬼-结束",
         ]},
-        "抓鬼轮次计算-max-fuben": {"max_hit": ZHUOGUI_ROUNDS - 1},
+        "抓鬼轮次计算-max": {"max_hit": ZHUOGUI_ROUNDS - 1},
     }
     run_task(L, fuben_entry, override=fuben_override,
              timeout=timeouts["fuben"], label=f"队长 {fuben_entry}（+{ZHUOGUI_ROUNDS}轮鬼）")
