@@ -1,0 +1,131 @@
+{
+    "zhanghao_xinxi": {
+        "next": [
+            "账号信息-打开人物界面",
+            "[JumpBack]panduan_zhujiemian"
+        ]
+    },
+    "账号信息-打开人物界面": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/chenghao.png",
+            "zonghe/jiahao.png"
+        ],
+        "roi": [
+            1206,
+            637,
+            66,
+            57
+        ],
+        "pre_delay": 1000,
+        "action": "ClickKey",
+        "key": [
+            57,
+            51
+        ],
+        "post_delay": 2000,
+        "next": [
+            "账号信息-人物界面成功",
+            "[JumpBack]人物界面-按键打开失败-点击图标"
+        ]
+    },
+    "账号信息-人物界面成功": {
+        "recognition": "OCR",
+        "expected": [
+            "人物属性"
+        ],
+        "roi": [
+            531,
+            3,
+            175,
+            60
+        ],
+        "next": [
+            "账号信息-记录账号ID"
+        ]
+    },
+    "账号信息-记录账号ID": {
+        "recognition": "DirectHit",
+        "action": "Custom",
+        "custom_action": "logOcr",
+        "custom_action_param": {
+            "mode": "id",
+            "roi": [
+                334,
+                119,
+                125,
+                41
+            ]
+        },
+        "next": [
+            "账号信息-回主界面"
+        ]
+    },
+    "账号信息-回主界面": {
+        "recognition": "DirectHit",
+        "next": [
+            "账号信息-打开背包",
+            "[JumpBack]panduan_zhujiemian_ks"
+        ]
+    },
+    "账号信息-打开背包": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/chenghao.png",
+            "zonghe/jiahao.png"
+        ],
+        "roi": [
+            1206,
+            637,
+            66,
+            57
+        ],
+        "pre_delay": 1000,
+        "action": "ClickKey",
+        "key": [
+            57,
+            33
+        ],
+        "post_delay": 1000,
+        "next": [
+            "账号信息-背包打开成功",
+            "[JumpBack]背包界面-按键打开失败-点击图标"
+        ]
+    },
+    "账号信息-背包打开成功": {
+        "recognition": "TemplateMatch",
+        "template": "beibao/beibao_jiemian_panduan.png",
+        "roi": [
+            335,
+            5,
+            577,
+            68
+        ],
+        "next": [
+            "账号信息-记录金币银币"
+        ]
+    },
+    "账号信息-记录金币银币": {
+        "recognition": "DirectHit",
+        "action": "Custom",
+        "custom_action": "logOcr",
+        "custom_action_param": {
+            "mode": "coins",
+            "gold_roi": [
+                189,
+                626,
+                157,
+                51
+            ],
+            "silver_roi": [
+                420,
+                628,
+                159,
+                47
+            ]
+        },
+        "next": [
+            "panduan_zhujiemian"
+        ]
+    }
+}
