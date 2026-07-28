@@ -49,6 +49,14 @@ def _find_letter(answer_text, options):
     return None
 
 
+# 模糊匹配阈值（实证，非拍脑袋）：对真实题库做 OCR 篡改模拟——同题 1 处错位相似度中位
+# 0.96、p5≈0.857；异题两两最高 0.80（"亚猜一成语"vs"火猜一成语" 这类单字谜共享"猜一成语"
+# 后缀）。故 ≤0.80 的阈值都会误命中不同题。取 0.85：在天花板 0.80 之上留 0.05 裕度（实测
+# 0% 误命中），仍兜住 ~96% 的 1 字 / ~77% 的 2 字 OCR 错误；更重的错位命中不了也无所谓，
+# 交给 AI 兜底。宁漏不错——漏了只是多一次 AI 调用，错了会把错答当缓存命中反复点。
+_FUZZY_THRESHOLD = 0.85
+
+
 def _cache_lookup(question, options):
     nq = _norm(question)
     if not nq:
@@ -57,24 +65,32 @@ def _cache_lookup(question, options):
         cache = _cache_load()
     letter = _find_letter((cache.get(nq) or {}).get("answer", ""), options)
     if letter:
+        logger.info(f"缓存精确命中：《{question}》→ {letter}")
         return letter
     best_q, best_ratio = None, 0.0
     for q in cache:
         r = difflib.SequenceMatcher(None, nq, q).ratio()
         if r > best_ratio:
             best_ratio, best_q = r, q
-    if best_q and best_ratio * 100 >= 80:
-        return _find_letter(cache[best_q].get("answer", ""), options)
+    if best_q and best_ratio >= _FUZZY_THRESHOLD:
+        matched = cache[best_q]
+        logger.info(f"缓存模糊命中({best_ratio:.2f})：《{question}》≈《{matched.get('question','')}》→ {matched.get('answer','')}")
+        return _find_letter(matched.get("answer", ""), options)
     return None
 
 
-def _cache_store(question, answer_text):
+def _cache_store(question, answer_text, options=None):
     nq = _norm(question)
     if not nq or not answer_text:
         return
     with _CACHE_LOCK:
         cache = _cache_load()
-        cache[nq] = {"answer": answer_text, "question": question, "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        cache[nq] = {
+            "answer": answer_text,
+            "options": options or {},   # 识别到的 A/B/C/D 候选项文本（便于人工核对 / 排查 OCR）
+            "question": question,
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
         _cache_save(cache)
 
 
@@ -82,10 +98,11 @@ def _cached_or_ask(question, options, ask):
     letter = _cache_lookup(question, options)
     if letter:
         return letter
+    logger.info(f"缓存未命中，调用AI：《{question}》")
     ai_letter = ask()
     up = (ai_letter or "").strip().upper()
     if up in options and options[up]:
-        _cache_store(question, options[up])
+        _cache_store(question, options[up], options)
     return ai_letter
 
 
@@ -142,6 +159,25 @@ def _click_answer(context, list_answer, question, answer):
     time.sleep(2)
 
 
+# Few-shot 样本：覆盖梦幻西游科举/元宵灯谜的常见题型（字谜拆字、成语双关/典故、物品谜、
+# 数学借瓶法）。每条答案均经灯谜题库核实，用来教模型"先按谜面推理、再只回字母"。
+# 这些题多半已在缓存里（命中即返回），样本主要让模型遇到**新题**时套用同一思路。
+_FEW_SHOT = [
+    {"q": "亚，猜一成语", "opts": "A:死心塌地 B:有口难言 C:自命不凡 D:有声有色",
+     "hint": "“亚”字加“口”旁就是“哑”——有口却说不出", "a": "B"},
+    {"q": "十月十日，猜一字", "opts": "A:丰 B:廿 C:明 D:朝",
+     "hint": "“朝”字拆开正好是 十、月、十、日 四个部件", "a": "D"},
+    {"q": "武大郎设宴，猜一成语", "opts": "A:推杯换盏 B:高朋满座 C:觥筹交错 D:宴无好宴",
+     "hint": "武大郎个子矮，所以他请的客人都比他“高”", "a": "B"},
+    {"q": "悟空思做遮体裙，猜一成语", "opts": "A:与虎谋皮 B:以德服人 C:三人成虎 D:笑逐颜开",
+     "hint": "悟空的招牌服饰是虎皮裙，做裙要先谋虎皮", "a": "A"},
+    {"q": "有风不动无风动，不动无风动有风（猜一物）", "opts": "A:扇子 B:灯泡 C:窗户 D:风铃",
+     "hint": "有天然风时不用动它，没风时要手动扇出风", "a": "A"},
+    {"q": "3个空瓶换1瓶啤酒，18个空瓶最多免费喝几瓶", "opts": "A:6 B:9 C:8 D:7",
+     "hint": "借瓶法：换回来的酒喝完仍是空瓶，18÷(3-1)=9", "a": "B"},
+]
+
+
 def _ask_with_openai(base_url, api_key, model, question, options):
     valid = {k: v for k, v in options.items() if v}
     if not valid:
@@ -149,13 +185,21 @@ def _ask_with_openai(base_url, api_key, model, question, options):
     prompt = f"问题：{question}\n请从以下选项中选择一个最正确的答案，并只返回选项的字母（例如：A, B, C, D）。\n"
     for k, v in valid.items():
         prompt += f"{k}: {v}\n"
+    messages = [{"role": "system", "content":
+        "你是猜谜高手（字谜、成语谜、灯谜、脑筋急转弯、常识题）。"
+        "请先按谜面推理（字形拆字 / 双关谐音 / 典故 / 常识 / 借瓶法等），"
+        "再只回答一个选项字母（A/B/C/D），不要输出多余文字。"}]
+    for ex in _FEW_SHOT:
+        messages.append({"role": "user",
+            "content": f"问题：{ex['q']}\n{ex['opts']}\n提示：{ex['hint']}\n只返回字母。"})
+        messages.append({"role": "assistant", "content": ex["a"]})
+    messages.append({"role": "user", "content": prompt})
     client = OpenAI(base_url=base_url, api_key=api_key or "ollama",
                    http_client=httpx.Client(trust_env=False, timeout=120), max_retries=0)
     try:
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role": "system", "content": "You are a helpful assistant."},
-                      {"role": "user", "content": prompt}],
+            messages=messages,
             max_tokens=50, stream=False, extra_body={"thinking": {"type": "disabled"}},
         )
         content = (resp.choices[0].message.content or "").strip().upper()
