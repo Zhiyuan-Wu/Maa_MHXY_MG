@@ -121,9 +121,10 @@
             -6,
             -4
         ],
-        "post_delay": 3000,
+        "post_delay": 5000,
         "next": [
-            "mijingxiangyao"
+            "mijingxiangyao",
+            "[JumpBack]秘境-云乐游失败-走活动入口"
         ]
     },
     "mijingxiangyao": {
@@ -518,5 +519,151 @@
         "pre_delay": 1000,
         "action": "Click",
         "post_delay": 1500
+    },
+    "秘境-云乐游失败-走活动入口": {
+        "max_hit": 1,
+        "pre_delay": 500,
+        "next": [
+            "[JumpBack]panduan_zhujiemian_ks",
+            "主界面-秘境降妖"
+        ]
+    },
+    "主界面-秘境降妖": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/jiahao.png",
+            "zonghe/chenghao.png",
+            "zonghe/baoguo.png",
+            "zonghe/baoguo_man.png"
+        ],
+        "roi": [
+            1197,
+            540,
+            78,
+            157
+        ],
+        "post_delay": 2000,
+        "action": "ClickKey",
+        "key": [
+            57,
+            31
+        ],
+        "post_wait_freezes": 100,
+        "next": [
+            "活动-秘境降妖",
+            "[JumpBack]活动-界面-打开失败-点击活动图片",
+            "[JumpBack]战斗平衡弹窗-点击关闭"
+        ]
+    },
+    "活动-秘境降妖": {
+        "recognition": "TemplateMatch",
+        "template": "zonghe/huodong_jiemian_panduan.png",
+        "roi": [
+            350,
+            23,
+            600,
+            62
+        ],
+        "next": [
+            "活动-秘境降妖-点击日常活动"
+        ]
+    },
+    "活动-秘境降妖-点击日常活动": {
+        "recognition": "OCR",
+        "expected": [
+            "日常活动"
+        ],
+        "roi": [
+            132,
+            90,
+            156,
+            59
+        ],
+        "action": "Click",
+        "post_wait_freezes": 500,
+        "next": [
+            "活动-秘境降妖-向上滑动到顶端"
+        ]
+    },
+    "活动-秘境降妖-向上滑动到顶端": {
+        "action": "MultiSwipe",
+        "swipes": [
+            {
+                "starting": 0,
+                "begin": [
+                    731,
+                    129,
+                    1,
+                    1
+                ],
+                "end": [
+                    732,
+                    444,
+                    1,
+                    1
+                ]
+            },
+            {
+                "starting": 1000,
+                "begin": [
+                    731,
+                    129,
+                    1,
+                    1
+                ],
+                "end": [
+                    732,
+                    444,
+                    1,
+                    1
+                ]
+            }
+        ],
+        "post_delay": 500,
+        "next": [
+            "活动-秘境降妖-开始",
+            "[JumpBack]baotu_huodong_down"
+        ]
+    },
+    "活动-秘境降妖-开始": {
+        "recognition": "And",
+        "all_of": [
+            {
+                "sub_name": "rukou",
+                "recognition": "TemplateMatch",
+                "template": [
+                    "mijing/mijing_rukou.png"
+                ],
+                "roi": [
+                    316,
+                    76,
+                    834,
+                    433
+                ],
+                "green_mask": true,
+                "threshold": 0.9
+            },
+            {
+                "recognition": "OCR",
+                "expected": [
+                    "秘境降妖"
+                ],
+                "roi": "rukou"
+            }
+        ],
+        "box_index": 0,
+        "next": [
+            "活动-秘境降妖-开始-点击参加"
+        ]
+    },
+    "活动-秘境降妖-开始-点击参加": {
+        "recognition": "OCR",
+        "expected": [
+            "参加"
+        ],
+        "roi": "活动-秘境降妖-开始",
+        "action": "Click",
+        "post_delay": 4000,
+        "next": []
     }
 }
