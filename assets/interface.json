@@ -89,6 +89,11 @@
     ],
     "task": [
         {
+            "name": "帮派任务",
+            "entry": "bangpai_renwu",
+            "description": "帮派任务"
+        },
+        {
             "name": "创建队伍",
             "entry": "chuangjianduiwu",
             "option": [
