@@ -240,8 +240,8 @@
         "post_delay": 3000
     },
     "帮派-间隔20秒-最大10分钟": {
-        "max_hit": 30,
-        "pre_delay": 20000
+        "max_hit": 60,
+        "pre_delay": 10000
     },
     "bangpai_renwu_sleep": {
         "pre_delay": 700000,
