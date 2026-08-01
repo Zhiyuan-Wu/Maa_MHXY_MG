@@ -94,6 +94,11 @@
             "description": "帮派任务"
         },
         {
+            "name": "shimen_renwu_new",
+            "entry": "shimen_renwu_new",
+            "description": "shimen_renwu_new"
+        },
+        {
             "name": "dazao",
             "entry": "dazao",
             "description": "dazao"
