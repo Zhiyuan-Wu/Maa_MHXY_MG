@@ -94,6 +94,11 @@
             "description": "帮派任务"
         },
         {
+            "name": "dazao",
+            "entry": "dazao",
+            "description": "dazao"
+        },
+        {
             "name": "创建队伍",
             "entry": "chuangjianduiwu",
             "option": [

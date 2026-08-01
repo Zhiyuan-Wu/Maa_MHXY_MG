@@ -30,6 +30,8 @@ description: 排查"梦幻西游五开"（agent/run_5r.py）运行日志的 SOP�
 | 渣中 | 16576 | 6 |
 
 > **渣中（idx6）一贯最慢**——实例特性，不是 bug（每次排查都会看到它的 shimen/baotu/mijing 耗时偏高）。
+>
+> **角色名会变，脚本勿硬编码**：`run_5r.py::ROLES` 改名后（如 07.30 把 4 号位「缤纷」改成「欧阳」，端口 16448 / MuMu idx2 不变），编排日志的角色名随之改变。耗时矩阵脚本必须**从日志动态读 roles**（见 §4），写死 `['队长','渣中','6130','缤纷','晚风']` 会让改名号整列变 `-`，造成"该号一个任务都没跑"的误判。端口→MuMu idx 的 `16384+32*idx` 约定不变，原生层按**端口 / Tx 线程**归号最稳。
 
 ## 2. 排查流程（按顺序）
 
@@ -44,7 +46,7 @@ description: 排查"梦幻西游五开"（agent/run_5r.py）运行日志的 SOP�
 2. **耗时异常**：
    - **异常短**（如某任务 10~50s，明显短于同批其它号）= **疑似静默失败**（on_error→空节点 假成功，见已知问题 ③）。重点盯 `mijing_renwu`（曾出现缤纷 47s）。
    - **异常长/贴着超时**（如 `≤2400s` 的任务跑了 2300s+）= 可能卡循环/冲关（盯 `mijing`、`wabaotu`）。
-   - 系统化做全 5 号 × 全任务横向对比 + 基线参照，见 [§3](#3-任务耗时矩阵与典型基线)。
+   - 系统化做全 5 号 × 全任务横向对比 + 基线参照，见 [§3](#3-量化报告每次排查必出三份)。耗时矩阵只是其中一份——**每次排查必出的三份量化报告**（耗时矩阵+异常标记 / 账号金币·银币变化量 / 新入库 AI 答题质量）见 §3，务必**全部产出再下结论**。
 3. **全员完成校验**：最后一项（通常 `kejuxiangshi`）5 个号是否都 `<<< 完成`。缺谁谁就在那个任务或上一个出了问题。
 
 ### Step 3 — 原生层 on_error / 回调异常统计
@@ -85,9 +87,21 @@ powershell.exe -NoProfile -Command "\$live=(Get-CimInstance Win32_Process).Proce
 ```
 **处置**：重启 autolife server（加载新 jobs.py：`stdout=DEVNULL`+`stderr→文件`+`taskkill /T` 收尾）；run_5r 侧已用 `TerminateProcess` 跳过 DLL detach。机制详见 [[on-error-kongjiedian-false-success]] 同侧笔记与 git 历史 `fix(run_5r): os._exit 改 TerminateProcess` / autolife `feat(jobs): 新增 run_5r_full`。
 
-## 3. 任务耗时矩阵与典型基线
+## 3. 量化报告（每次排查必出三份）
 
-Step 2「耗时异常」的系统化做法：把当天 5 号 × 全部单人任务拉成耗时矩阵横向比，是挖「假成功 / 卡循环 / 整轮预算被吃」最快的办法（呼应心法 3：耗时是最强信号）。**判读永远以同批横向对比为准，绝对值仅供参考。**
+排查不仅定位故障，还要量化"这轮到底跑得怎么样"。**每次排查必须产出以下三份报告并贴进结论**，缺一不可：
+
+| 报告 | 回答的问题 | 命令 |
+|---|---|---|
+| 一：耗时矩阵 + 异常标记 | 每号每个任务多久？哪些偏离典型基线 / 超时？ | §4 矩阵脚本 |
+| 二：账号金币·银币变化量 | 这轮跑完，每号钱是涨是跌、涨跌多少？ | §4 account 脚本 |
+| 三：科举新入库答题质量 | keju_ai_cache.json 本次新存的 AI 答案有没有不在选项里 / 自相矛盾 / 与 tiku.txt 不符？ | §4 新题质量脚本 |
+
+一键命令见 [§4](#4-诊断命令速查复制改日期即可)。
+
+### 报告一：耗时矩阵与典型基线
+
+把当天 5 号 × 全部单人任务拉成耗时矩阵横向比，是挖「假成功 / 卡循环 / 整轮预算被吃」最快的办法（呼应心法 3：耗时是最强信号）。**判读永远以同批横向对比为准，绝对值仅供参考。脚本会自动给超过典型基线「留意线」的单元格标 `*`、墙钟超时标 `X`；但「异常短」（假成功）脚本不标，需人工结合 §5 ⑨/③ 留意（如 keju<60s、mijing<200s）。**
 
 ### 建矩阵
 
@@ -153,6 +167,29 @@ Step 2「耗时异常」的系统化做法：把当天 5 号 × 全部单人任�
 - **keju 全员 ~50s ⚠ 但要警惕**：50s **不是"答得快"，是没答**——全员走 `向上滑动到顶端` 假成功出口，见 §5 ⑨。
 - **zhuogui「方案二」限轮器实跑验证通过**：fuben115(+2轮鬼) 阶段 `捉鬼-fuben桥接`→`抓鬼轮次计算-max`(=max_hit)→`捉鬼-结束` 整链各命中 1 次，全日志 0 处旧节点名（`抓鬼轮次计算-max-fuben`/`捉鬼-fuben结束`）。
 
+### 报告二：账号金币·银币变化量
+
+`agent/data/account_info.log` 每个 `zhanghao_xinxi` 节点写一行（每号每次 run 一条）：`[时间] 账号: 127.0.0.1:<port> | 金币: <n> | 银币: <n>`。按端口取**最近两条**算 Δ，即"本次 run 相对上一次 run"的净变化（本跑产出 + 期间消耗/收入）。判读：
+
+- **金币 Δ 正常小幅为正**：日常产出 + 押镖/活跃度收入，扣挖宝/修炼等消耗；银币通常缓涨。
+- **Δ 异常**：暴负 → 大额消耗（买道具/点技能）；为 0 → zhanghao_xinxi 的 OCR 没刷新/读到旧值（留意已知 ⑪ 复发）；暴正 → 上次没跑、跨多天累计。
+- **任一行出现 `账号ID: (未知账号)`**（旧格式）→ 已知 ⑪ 复发，停；正常应为 `账号: 127.0.0.1:<port>`（新格式，07.27 起）。
+
+### 报告三：科举新入库答题质量
+
+> ⚠ 5r 科举答题链路要认准（用户专门纠正过，别搞混）：
+> - **`agent/data/keju_ai_cache.json`** = **5r 科举实际使用的题库**（本报告对象）。keju 答题节点 `活动-科举乡试-开始答题API` → `custom_recognition:"AIAnswer"` → `AIAnswer.py` **只加载这一个文件**：`_cache_lookup` 先查、命中即点；miss 才调智谱 AI，答完 `_cache_store` 存回。名义是"AI 缓存"，**事实上就是科举运行时题库**，每跑一次增量。
+> - `agent/custom/recognition/tiku.txt` = `searchAnswer.py` 加载的题库，给**别的任务**用（**不是** keju 的 `开始答题API` 节点），这里仅作交叉参照。
+> - `agent/custom/recognition/question_bank.json` = **遗留未接入文件**（全仓库 `grep question_bank\.json` 无代码引用），排查时**忽略它，别挂错**。
+
+结构 `{题干key: {answer, options{A,B,C,D}, question, ts}}`，`ts` 形如 `2026-07-30 17:43:28`。**"新入库"按 `ts[:10] == 当天日期` 界定**（最准；也可 `git diff HEAD` 交叉印证）。三道质量门（脚本见 §4）：
+
+1. **answer∉options（硬错误）**：AI 幻觉，答案不在四选项里 → 该题必错、必报（pipeline 命中 cache 即点选，会直接丢分）。
+2. **同题多答案冲突**：题干归一化（去标点/空格）后，全量 cache 里同一题出现多个不同 answer → AI 两次答得不一致，存疑。
+3. **与 `tiku.txt` 交叉**：tiku 已收录该题的标准答案，但 AI 答案不符 → AI 可能答错（或 tiku 用的是另一可接受答案，结合 options 人工确认）。
+
+**三门全 0 = 本次新题干净**；任一非 0 → 列明细人工复核。门 1 硬错误**只能删该 cache 条让其下次重答**（keju 不读 tiku，回填 tiku 对它无效）。
+
 ## 4. 诊断命令速查（复制改日期即可）
 
 ```bash
@@ -176,35 +213,119 @@ echo "OCR 到过的最大关卡: "; cat $BAKS 2>/dev/null | grep -oE '"text":"�
 ```
 
 ```bash
-# 自动生成耗时矩阵（行=任务，列=5号；`X`前缀=墙钟超时，`-`=该号整轮超时后未跑到；详见 §3）
+# 报告一：耗时矩阵（动态读 roles + 超基线标 *、超时标 X；同名任务记最后一次）
 "$PY" -c "
 import re,sys,collections
 try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 except Exception: pass
 log=open(sys.argv[1],encoding='utf-8').read()
-data=collections.defaultdict(dict)
+data=collections.defaultdict(dict); order=[]
 for line in log.splitlines():
     m=re.search(r'<<< \[([^\]]+)\] 单人 (\S+) 完成（用时 ([\d.]+)s）', line)
-    if m: data[m.group(2)][m.group(1)]=int(float(m.group(3))); continue
+    if m:
+        t=m.group(2)
+        if t not in data: order.append(t)
+        data[t][m.group(1)]=int(float(m.group(3))); continue
     m=re.search(r'!!! \[([^\]]+)\] 单人 (\S+) 超时 ([\d.]+)s', line)
-    if m: data[m.group(2)][m.group(1)]=-int(float(m.group(3)))   # 负数=超时
-roles=['队长','渣中','6130','缤纷','晚风']
-print('%-18s'%'任务'+''.join('%-9s'%r for r in roles))
-for t in data:
+    if m:
+        t=m.group(2)
+        if t not in data: order.append(t)
+        data[t][m.group(1)]=-int(float(m.group(3)))   # 负数=超时
+# 动态读 roles：单人阶段开头那一行「对象: 1:队长, 2:渣中, 3:6130, 4:欧阳, 5:晚风」
+# ⚠ 必须行内扫描——[^，;] 字符类含换行，跨行 search 会吞掉后续所有时间戳行(17:43:05] 等)误当 roles
+roles=[]
+for line in log.splitlines():
+    if '对象:' in line or '对象：' in line:
+        seg=line.split('对象:')[-1] if '对象:' in line else line.split('对象：')[-1]   # 只取"对象:"之后，避开行首时间戳 17:43:05]
+        for _,n in re.findall(r'(\d+):([^\s,，;：]+)', seg):
+            if n not in roles: roles.append(n)
+        break
+if not roles:   # 兜底：从完成行抓角色名
+    for line in log.splitlines():
+        m=re.search(r'<<< \[([^\]]+)\] 单人 \S+ 完成', line)
+        if m and m.group(1) not in roles: roles.append(m.group(1))
+    roles=roles[:5] or ['?']
+# 典型基线「留意线」(秒)，超过即标 *；未列=波动大不判绝对值（如 wabaotu_qingli）
+LIM={'shuangbei':60,'fuli_qiandao':120,'shimen_renwu':600,'yunbiao_renwu2':1000,
+     'baotu_renwu':1000,'打开大地图_69副本':60,'mijing_renwu':2100,'sanjieqiyuan':200,
+     'huoyue_lingqu':60,'zhengli_baibao':150,'jiayuan_zhengli':150,'huoli':120,
+     'kejuxiangshi':300,'zhanghao_xinxi':60}
+print('%-16s'%'任务'+''.join('%-9s'%r for r in roles))
+for t in order:
     cells=[]
     for r in roles:
         v=data[t].get(r)
-        cells.append('-' if v is None else (('X'+str(-v)) if v<0 else str(v)))
-    print('%-18s'%t+''.join('%-9s'%c for c in cells))
+        if v is None: cells.append('-')
+        elif v<0: cells.append('X'+str(-v))
+        else: cells.append(str(v)+('*' if (LIM.get(t) and v>LIM[t]) else ''))
+    print('%-16s'%t+''.join('%-9s'%c for c in cells))
+print('(* = 超过典型基线留意线，X = 墙钟超时；异常短=疑似假成功，人工留意见 §5 ③/⑨)')
 " "$(ls -t debug/run_5r/run_5r_<YYYYMMDD>_*.log | head -1)"
 # 注：中文列宽不齐不影响判读；Windows cmd 中文乱码可 `chcp 65001`，数字列才是重点。
-#   同名任务（如两次「打开大地图_69副本」）只记最后一次。
+#   roles 从日志动态读取（§1：角色名会变，勿硬编码）。基线表见 §3「典型正常耗时基线」。
 ```
 
 > **用 Python 解析 maafw 里某行的 JSON 缓存**（grep 正则遇到嵌套 `]` 会断，用 python 最稳）：
 > ```bash
 > "$PY" -c "import sys,json; ..." # 见 [[maafw-ocr-expected-and-only-rec]] 里的实例
 > ```
+
+```bash
+# 报告二：账号金币/银币变化量（每端口取最近两条算 Δ = 本次 − 上次）
+"$PY" -c "
+import re,sys,collections
+try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception: pass
+rows=[]
+for line in open(sys.argv[1],encoding='utf-8'):
+    m=re.search(r'账号:\s*(127\.0\.0\.1:\d+)\s*\|\s*金币:\s*(-?\d+)\s*\|\s*银币:\s*(-?\d+)', line)
+    if m: rows.append((m.group(1),int(m.group(2)),int(m.group(3))))
+by=collections.defaultdict(list)
+for port,g,s in rows: by[port].append((g,s))
+print('%-16s'%'账号(port)'+''.join('%-11s'%x for x in ['上次金币','本次金币','Δ金币','上次银币','本次银币','Δ银币']))
+for port in sorted(by):
+    recs=by[port]
+    if len(recs)<2: print('%-16s'%port+'  (仅 %d 条，无法算 Δ)'%len(recs)); continue
+    (g0,s0),(g1,s1)=recs[-2],recs[-1]
+    d=lambda n:('+'+str(n)) if n>=0 else str(n)
+    print('%-16s'%port+''.join('%-11s'%x for x in [g0,g1,d(g1-g0),s0,s1,d(s1-s0)]))
+print('Δ = 本次(最近一条) − 上次；负=净消耗。任一行含 (未知账号) = 已知 ⑪ 复发，停。')
+" agent/data/account_info.log
+```
+
+```bash
+# 报告三：科举题库(keju_ai_cache.json)新入库答题质量（默认查当天 ts；传第 2 参指定日期如 2026-07-30）
+"$PY" -c "
+import json,sys,re,collections,ast
+try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception: pass
+path=sys.argv[1]; day=sys.argv[2] if len(sys.argv)>2 else None
+d=json.load(open(path,encoding='utf-8'))
+norm=lambda q: re.sub(r'[\s　，。、,.?!:;（）()【】]+','',q or '')
+new={k:v for k,v in d.items() if (not day) or v.get('ts','')[:10]==day}
+print('keju_ai_cache 总条数:',len(d),'| 本次检查(ts[:10]=='+str(day)+'):',len(new))
+hard=[(k,v) for k,v in new.items() if v.get('answer') not in list(v.get('options',{}).values())]
+print('\n[门1] answer 不在四选项(硬错误/AI幻觉):',len(hard))
+for k,v in hard[:10]: print('   ! answer=',repr(v.get('answer')),'opts=',v.get('options'),'Q:',(v.get('question') or k)[:50])
+qn=collections.defaultdict(set)
+for k,v in d.items():
+    a=v.get('answer')
+    if a: qn[norm(v.get('question',k))].add(a)
+conf={q:a for q,a in qn.items() if len([x for x in a if x])>1}
+print('\n[门2] 同题多答案冲突(全量):',len(conf))
+for q,a in list(conf.items())[:10]: print('   ?',list(a),'Q:',q[:50])
+tk={}
+for line in open('agent/custom/recognition/tiku.txt',encoding='utf-8'):
+    mm=re.match(r'\x22(.+?)\x22:\s*(\[.+\])', line.strip())
+    if mm:
+        try: tk[norm(mm.group(1))]=set(ast.literal_eval(mm.group(2)))
+        except Exception: pass   # 跳过含 nbsp 等非标准行
+diff=[(k,v.get('answer'),tk[norm(v.get('question',k))]) for k,v in new.items() if norm(v.get('question',k)) in tk and v.get('answer') not in tk[norm(v.get('question',k))]]
+print('\n[门3] tiku 已有该题但 AI 答案不符:',len(diff),'(tiku 解析',len(tk),'题)')
+for k,a,t in diff[:10]: print('   != AI:',repr(a),' tiku:',t,'Q:',k[:40])
+print('\n三门全 0 = 本次新题干净。门1 硬错误应删该 cache 条让其重答（keju 不读 tiku，回填 tiku 无效）。')
+" agent/data/keju_ai_cache.json 2026-07-30
+```
 
 ## 5. 已知问题速查表
 
@@ -223,6 +344,7 @@ for t in data:
 
 | ⑩ | yunbiao 某号"完成"且耗时不算很短（~480–510s），但 `点击押送普通镖_确定` 只命中 1~2 次（应 3）；trace：`押送1→确定1→运镖中×N→[5~7分钟 点击押送普通镖银(三次) OCR 全 miss]→活动-运镖-开始-点击参加 on_error→运镖完成onerror` | **运镖假完成（只跑 1~2 镖）** | `活动-运镖-开始-点击参加` 的 next 只有 `[押送, 运镖中, 战斗中-等待20秒]`，**无兜底回主界面/重开面板的回旋门**；且 JumpBack 回 `参加` 后**不重新 Click 参加**（只重扫 next）。第 1 镖运到后押送面板若没回到可识别状态（被奖励/奇遇弹窗遮挡，或需重点"参加"），押送 OCR（roi `[933,262,307,237]`）持续 miss → 干等到 on_error 假完成。07.26 渣中/缤纷/6130 均 `确定×1`，队长/晚风 `确定×3` 正常。**判别**：Python 解析 maafw 按号（Tx→角色见 §1）数 `点击押送普通镖_确定`，<3 即中。**堵法**：参加节点 next 末尾加 `[JumpBack]panduan_zhujiemian` 或"重开运镖面板"回旋门；或 run_5r 加 sentinel 校验押送次数 |
 | ⑪ | `agent/data/account_info.log` 全行 `账号ID: (未知账号)`，但金币/银币数字正常；loguru（`debug/custom/<日期>.log`）里同号 `[logOcr] 暂存账号ID: <数字>` 与 `[logOcr] 已写入: ...(未知账号)` **共存**，0 异常；maafw 里 `账号信息-记录账号ID`/`记录金币银币` 节点均命中、`_logOcr_probe`(logOcr 内部 OCR 探针，经 `context.run_recognition` 调用，日志格式是 `[MaaContextRunRecognition]` **不是** `reco hit`) 命中 >0 | **logOcr `_PENDING` key 失配（5 开并发）** | `agent/custom/action/logOcr.py:74,84` 用 `id(context.tasker)` 做跨节点暂存 key。5 开并发下 MaaFw 每次 Custom Action 调用传入的 tasker 代理对象不同 → `id()` 在 mode=id 与 mode=coins 两次不同 → `pop` 拿不到写入的条目 → 返回 `"(未知账号)"`（`logOcr.py:84`）。**单开测试不复现**（07.26 凌晨 00:17 单开正常）。`(未知账号)`≠`(未识别)`：前者=跨节点 key 丢了，后者=单次 ROI OCR 失败（`logOcr.py:53`，会写成 `账号ID: (未识别)`）。**堵法（已实施 07.27）**：logOcr 改用 `context.tasker.controller.info["adb_serial"]`（如 `127.0.0.1:16576`，通过 controller 的 C handle 查、**不依赖 Python wrapper 对象身份**，跨节点稳定）做账号标识；pipeline 删掉 mode=id 整条人物界面链（`zhanghao_xinxi.json` 7 节点→4 节点），只留 `打开背包→记录金币银币` 单 logOcr 节点。**渣中(16576) 单跑实测通过**：`账号: 127.0.0.1:16576 | 金币: 246537 | 银币: 5865248`，不再 `(未知账号)`。判此 bug 是否复现：看 account_info.log 是否出现 `账号: <ip:port>`（新）而非 `账号ID: (未知账号)`（旧） |
+| ⑫ | fuben115 报"完成"但**最后一个副本(50普通-3)没打 + 2 轮鬼没抓**；maafw 里 `115点击地图-百晓仙子-70普通-3` 走 `on_error→空节点`(on_error 截图 OCR 到"师门任务/张百忍来信"而非"选择副本")，`捉鬼-fuben桥接`/`抓鬼轮次计算-max`/`捉鬼-结束` 全 0 命中 | **副本链式假成功(导航节点无兜底)** | `fuben115.json` 是 6 副本线性链 + `[JumpBack]捉鬼-fuben桥接`：`50侠士①→70侠士→50侠士②→50普通-1→50普通-2→50普通-3→捉鬼桥接(2轮鬼)`，每个"完成-退出"后 next 到下个副本的导航。**导航节点(如 `115点击地图-百晓仙子-70普通-3`)next 只有 `[JumpBack]再次点击地图百晓仙子, 选择副本-X]`，无 `[JumpBack]panduan_zhujiemian` 回主界面兜底**。前副本退出时画面若没回长安城小地图(被师门/活动弹窗带偏)，小地图模板 + "选择副本"OCR 连续 miss → 20s 超时 → 该节点无 on_error → 全局空节点 → `PipelineNode.Succeeded` → **该副本及后续整链(含 2 轮鬼)全跳过**，编排层只看 job.done 报"完成"。07.30 实证：6 个"完成-退出"节点里前 5 个都 hit=1，第 6 个(50普通-3)卡在导航 on_error(17:42:35)，`捉鬼-fuben桥接` 0 命中。**判别**：fuben115 用时正常(~2000s) 不可信，须去 maafw 数 6 个"副本完成-退出"节点(`115-50侠士-`/`115-70级-`/`115-50普通-1/2/3-副本完成-退出`)是否全 hit + `捉鬼-fuben桥接` 是否 hit。**堵法**：①每个导航节点 next 末尾加 `[JumpBack]panduan_zhujiemian`(回主界面重开小地图，全项目通用兜底，CLAUDE.md 技巧1)；或②run_5r 加 sentinel 校验"6 副本完成-退出 + 捉鬼桥接"命中数 |
 
 ### 5.1 每轮"必触发"的 on_error（看到别慌，逐个对号）
 
@@ -241,7 +363,7 @@ for t in data:
 
 - **记忆**（`~/.claude/projects/.../memory/`）：`maafw-ocr-expected-and-only-rec`（OCR expected 子串匹配 + only_rec 乱码）、`on-error-kongjiedian-false-success`（假成功 + sentinel）、`maafw-resource-not-thread-safe`（每账号独立 Resource）、`maa-pipeline-task-entry-pattern`（next/JumpBack 状态机）。
 - **项目文档**：`CLAUDE.md`（pipeline 节点/next/on_error 机制）、`docs/description/状态机设计模式.md`。
-- **相关代码**：`agent/run_5r.py`（编排 + ROLES + TIMEOUTS）、`agent/custom/recognition/ocrNum.py`（活力/活跃度识别）、`assets/resource/base/pipeline/{mijing_renwu,yunbiao_renwu2,huoli}.json`、`assets/resource/base/default_pipeline.json`（全局 on_error→空节点）。
+- **相关代码**：`agent/run_5r.py`（编排 + ROLES + TIMEOUTS）、`agent/custom/recognition/{ocrNum.py,searchAnswer.py,AIAnswer.py,question_bank.json,tiku.txt}`（活力识别 + 科举题库 question_bank + 三界/科举题库 tiku + AI 缓存 keju_ai_cache）、`assets/resource/base/pipeline/{fuben115,mijing_renwu,yunbiao_renwu2,huoli}.json`、`assets/resource/base/default_pipeline.json`（全局 on_error→空节点）。
 
 ## 7. 排查心法
 
