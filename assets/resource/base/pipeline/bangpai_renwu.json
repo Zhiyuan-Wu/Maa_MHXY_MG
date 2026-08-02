@@ -6,7 +6,14 @@
             "[JumpBack]任务栏切换为任务",
             "[JumpBack]bangpai_huadong_down",
             "已领取帮派任务",
-            "[JumpBack]主界面-领取帮派任务"
+            "[JumpBack]bangpai_rukou_limit"
+        ]
+    },
+    "bangpai_rukou_limit": {
+        "max_hit": 1,
+        "next": [
+            "[JumpBack]panduan_zhujiemian_ks",
+            "主界面-领取帮派任务"
         ]
     },
     "bangpai_huadong_down": {
@@ -266,7 +273,7 @@
         "post_delay": 500
     },
     "bangpai_huodong_down": {
-        "max_hit": 6,
+        "max_hit": 15,
         "action": "Swipe",
         "begin": [
             733,
@@ -453,10 +460,10 @@
             "请选择要做的事"
         ],
         "roi": [
-            916,
-            9,
-            226,
-            528
+            876,
+            5,
+            311,
+            544
         ],
         "next": [
             "帮派任务-对话-点击"
@@ -469,10 +476,10 @@
             "切磋切磋"
         ],
         "roi": [
-            969,
-            72,
-            231,
-            475
+            876,
+            5,
+            311,
+            544
         ],
         "action": "Click",
         "post_delay": 1000
