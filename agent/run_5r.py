@@ -1,36 +1,47 @@
 """五开简单编排 —— 单进程、每账号独立 Resource、全用原生 pipeline、各步墙钟超时。
 
-参考 ``maa_daily_gift.py`` 的命令式 ``post_task`` 范式，不做任何自定义原子操作/God's eye。
-所有逻辑都复用仓库现有 pipeline：start / chuangjianduiwu / 5R_duizhang / 5R_duiyuan /
-fuben115 / 5R_duizhang_TR / 各种单人任务（运镖、宝图、每日签到…）。
+# 架构（两种部署，同一份代码）
+  - **本地模式（Win 单机）**：直接 ``python run_5r.py full``。``main()`` 顶部 ``_detect_backend``
+    探测 mumu_server——WIN_IP 是本机网卡 → **local**（Win 永远 local，同机保护）。本机 MuMu +
+    本机 adb（MuMu 自带 adb.exe），逐字节沿用旧行为。
+  - **远端模式（Mac 执行 + Win 实例）**：把 Maa 执行（OCR/资源）卸到 Mac、Win 只管 MuMu 生命周期，
+    缓解 Win 28.7GB 内存压力。链路：
+      Win ``mumu_server``（专用 0.0.0.0:5038 adb server + HTTP API :5080，**不加载 Maa 资源**）
+        ↓
+      Mac ``cli_server``（HTTP API :5090；每个 /run 起独立子进程跑 main()，**Maa 资源仅在此加载**）
+        ↓
+      Win ``remote <mode>`` → POST Mac:5090 → Mac 探测到 remote → 经 win:5038 adb 驱动设备、
+      经 win:5080 API 管生命周期（launch/shutdown/restart/ensure 实例）。
+    Mac 上 WIN_IP 非本机 + mumu_server healthy → **remote**。``be_*`` 包装层在 MuMu 生命周期入口
+    dispatch（remote→HTTP，local→现有函数）。关键简化：adb shell 探针经 ``ADB_SERVER_SOCKET``
+    透明打到 Win 设备，**只有 MuMuManager.exe 生命周期**走 HTTP（Win 二进制）。
 
-五个能力：
-  1. launch(tasker)              启动一个账号（任意状态→主界面），用原生 start
-  2a. team_form(taskers, ...)    组队：逐个邀请（队长每次跑 5R_duizhang，override 邀请名+
-                                  向下滑动 max_hit=1，每次只邀请一人、首次自动建队；对应队员
-                                  submit 5R_duiyuan，future 存全局 _TEAM_MEMBER_FUTS）
-  2b. team_run(taskers, ...)     执行副本+解散：队长 fuben_entry→5R_duizhang_TR；停掉队员并回收 future
-  3. solo_all(taskers, entries)  并行执行单人 pipeline（每个账号内顺序跑多个 entry）
-  4. zhuagui(taskers)            队长单人无限捉鬼：原生 zhuoguirenwu + ZHUAGUI_OVERRIDE
-                                  （关闭人员检测-不进入轮次选择，[JumpBack]钟馗-捉鬼任务-循环 续接）
-  5. main()                      串起：ensure 实例→连接→启动5个→组队→副本+解散→并行单人
-                                  （full 模式跑完会关闭除队长外的实例，释放内存）
+# 模式（``python run_5r.py <mode> [args]``）
+  任务模式（local/remote 自动）：
+    full      ensure 实例→连接→启动5个→组队→副本+解散→并行单人→关停全部实例
+    launch    只启动+登录 5 个账号
+    team      完整5人任务：启动 + 组队 + 副本+解散
+    form      启动登录 + 只组队（到全员入队即停，测组队用）
+    run       只执行副本+解散（前提：已组好队）
+    zhuagui   队长单人无限捉鬼（关闭人员检测-不进入轮次选择）；Ctrl+C 停
+    solo [任务名...] [--ids 1,3,5]   并行单人；任务名指定只跑哪些，--ids 指定账号(1-based，默认全部)
+    log_analysis [YYYYMMDD|YYYY-MM-DD]   解析日志打印【耗时矩阵】+【账号信息变化矩阵】（默认今天）
+              复刻自 .claude/skills/5r_log_analysis/SKILL.md；只读，不碰设备。
+    help / -h / --help   看用法
 
-自包含 & 可移动：
-  - 角色名/地址、包名、副本 entry、超时、单人任务列表等**全部内联在脚本头部「配置区」**，
-    不再读 config/5r_roles.json。MaaFw 的 DLL 由 pip 包自带，**无需把 deps/bin 放进 PATH**。
-  - 脚本可放在任意目录；移走后只需把头部 ``REPO_DIR`` 改成 Maa_MHXY_MG 仓库根目录
-    （须含 assets/ agent/）。换机器再改 ``MUMU_MANAGER``。
+  服务/客户端模式：
+    mumu_server   **Win 上跑**：起专用 0.0.0.0 adb server（5038）+ MuMu 生命周期 HTTP API（5080），
+                  不加载 Maa 资源。需 ≥37 的 platform-tools adb（MuMu 自带 36 不绑 0.0.0.0），
+                  设 MAA_5R_DEDICATED_ADB 指向它。Ctrl+C 退出（仅 kill 5038，不碰 MuMu 5037）。
+    cli_server    **Mac 上跑**：HTTP API（5090）接 CLI 指令。POST /run 起子进程跑 <mode>；
+                  POST /jobs/<id>/cancel = 杀子进程 = OS 回收 MaaFw/线程/adb 连接（等价退出进程清理）。
+                  GET /jobs/<id>/{status,logs} 轮询。单飞（一次一任务）。
+    remote <mode> [args]   **Win→Mac 客户端**：POST Mac cli_server /run + 轮询 logs/status，
+                  支持 full/launch/solo/log_analysis 等。等价本机 ``python run_5r.py <mode>``，
+                  但在 Mac 上执行。
 
-用法（任意目录，Python313）::
-    python run_5r.py                        # 全流程
-    python run_5r.py launch                 # 只启动+登录 5 个账号
-    python run_5r.py team                   # 只组队副本
-    python run_5r.py solo                   # 并行单人（头部 SOLO_ENTRIES）
-    python run_5r.py solo baotu_renwu       # 并行单人，只跑指定任务（宝图）
-    python run_5r.py solo baotu_renwu yunbiao_renwu2   # 只跑指定的几个
-    python run_5r.py zhuagui                # 队长单人无限捉鬼（关闭人员检测-不进入轮次选择）
-    python run_5r.py help                   # 查看常用单人任务名
+# 配置区（头部）：角色/地址(ROLES)、包名、副本 entry、超时、单人任务列表、远端 IP/端口。
+  Win/Mac 同一份代码：REPO_DIR 由 ``__file__`` 推导（``MAA_5R_REPO`` 可覆盖）。
 """
 import builtins
 import faulthandler
@@ -1243,9 +1254,128 @@ def print_help():
     print("          例: solo baotu_renwu                # 5 账号都跑宝图")
     print("              solo baotu_renwu --ids 1,3,5    # 只在账号 1/3/5 跑宝图")
     print("  账号编号 = 连接日志里的 [id] 角色（按 ROLES 顺序，从 1 开始）")
+    print("  log_analysis [YYYYMMDD|YYYY-MM-DD]   打印指定日期的耗时矩阵 + 账号信息变化矩阵（默认今天）")
+    print("  服务/客户端：mumu_server（Win，adb:5038+API:5080）| cli_server（Mac，API:5090）|")
+    print("    remote <mode> [args]（Win→Mac 提交；如 remote full / remote solo shimen_renwu_new --ids 1）")
     print("\n常用单人任务名（solo 可指定）：")
     for k, v in SOLO_TASKS_HELP.items():
         print(f"  {k:18} {v}")
+
+
+# ============================================================================
+# log_analysis：解析 run_5r 日志打印【耗时矩阵】+【账号信息变化矩阵】。
+# 复刻自 .claude/skills/5r_log_analysis/SKILL.md（无脚本，纯内联 -c 逻辑，此处落地为函数）。
+# ============================================================================
+# 单人任务"典型基线留意线"（秒）：单元格超过它则标 *（仅提醒，非异常）。不在表里的任务不标。
+_LOG_ANALYSIS_LIM = {
+    "shuangbei": 60, "fuli_qiandao": 120, "shimen_renwu": 600, "yunbiao_renwu2": 1000,
+    "baotu_renwu": 1000, "打开大地图_69副本": 60, "mijing_renwu": 2100, "sanjieqiyuan": 200,
+    "huoyue_lingqu": 60, "zhengli_baibao": 150, "jiayuan_zhengli": 150, "huoli": 120,
+    "kejuxiangshi": 300, "zhanghao_xinxi": 60,
+}
+
+
+def print_log_analysis(date_str=None):
+    """打印指定日期的【耗时矩阵】+【账号信息变化矩阵】。
+    日期：``YYYYMMDD`` 或 ``YYYY-MM-DD``，默认今天。
+    源文件：``debug/run_5r/run_5r_<date>_*.log``（取该日期**最新**一份）+ ``agent/data/account_info.log``。
+    """
+    import glob, re
+    if not date_str:
+        date_str = datetime.now().strftime("%Y%m%d")
+    ymd = date_str.replace("-", "")
+    if not (len(ymd) == 8 and ymd.isdigit()):
+        print(f"!! 日期格式不对：{date_str}（要 YYYYMMDD 或 YYYY-MM-DD）"); return
+    ymd_line = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"   # 行时间戳里的日期段 [YYYY-MM-DD ...]
+
+    files = sorted(glob.glob(os.path.join(DEBUG_DIR, "run_5r", f"run_5r_{ymd}_*.log")),
+                   key=lambda p: os.path.getmtime(p))
+    if not files:
+        print(f"!! 找不到 {ymd} 的 run_5r 日志（{DEBUG_DIR}/run_5r/run_5r_{ymd}_*.log）"); return
+    log_path = files[-1]
+    print(f"=== 日志分析（{ymd_line}）源：{os.path.basename(log_path)} ===\n")
+    log = open(log_path, encoding="utf-8", errors="replace").read()
+
+    # ---- 角色发现：扫「对象:」行（必须逐行，勿跨行 re —— [^，;] 会吞换行）----
+    roles = []
+    for line in log.splitlines():
+        if "对象:" in line or "对象：" in line:
+            seg = line.split("对象:", 1)[-1] if "对象:" in line else line.split("对象：", 1)[-1]
+            for _, n in re.findall(r"(\d+):([^\s,，;：]+)", seg):
+                if n not in roles:
+                    roles.append(n)
+            break
+
+    # ---- 耗时矩阵：完成 / 超时（同名任务记最后一次）----
+    order, data = [], {}
+    for line in log.splitlines():
+        m = re.search(r"<<< \[([^\]]+)\] 单人 (\S+) 完成（用时 ([\d.]+)s）", line)
+        if m:
+            t = m.group(2)
+            if t not in data:
+                order.append(t); data[t] = {}
+            data[t][m.group(1)] = int(float(m.group(3))); continue
+        m = re.search(r"!!! \[([^\]]+)\] 单人 (\S+) 超时 ([\d.]+)s", line)
+        if m:
+            t = m.group(2)
+            if t not in data:
+                order.append(t); data[t] = {}
+            data[t][m.group(1)] = -int(float(m.group(3)))   # 负数 = 超时
+    if not roles:   # fallback：从完成行提取角色
+        for line in log.splitlines():
+            m = re.search(r"<<< \[([^\]]+)\] 单人 \S+ 完成", line)
+            if m and m.group(1) not in roles:
+                roles.append(m.group(1))
+        roles = roles[:5] or ["?"]
+
+    print("--- 耗时矩阵（行=任务，列=5 号，格=秒；*=超基线留意线，X<N>=墙钟超时，-=未跑）---")
+    print("%-16s" % "任务" + "".join("%-9s" % r for r in roles))
+    for t in order:
+        cells = []
+        for r in roles:
+            v = data[t].get(r)
+            if v is None:
+                cells.append("-")
+            elif v < 0:
+                cells.append("X" + str(-v))
+            else:
+                cells.append(str(v) + ("*" if (_LOG_ANALYSIS_LIM.get(t) and v > _LOG_ANALYSIS_LIM[t]) else ""))
+        print("%-16s" % t + "".join("%-9s" % c for c in cells))
+    print("(* = 超过典型基线留意线，X = 墙钟超时；异常短=疑似假成功，人工留意见)\n")
+
+    # ---- 账号信息变化矩阵（本次=指定日期内末条；上次=其前一条[可跨日期]；Δ=本次-上次）----
+    info_path = os.path.join(AGENT_DIR, "data", "account_info.log")
+    print("--- 账号信息变化矩阵（本次 = 指定日期内末条；上次 = 其前一条；Δ = 本次-上次，负=净消耗）---")
+    print("%-16s" % "账号(port)" + "".join("%-11s" % x for x in ["上次金币", "本次金币", "Δ金币", "上次银币", "本次银币", "Δ银币"]))
+    by_port = {}            # port -> [(全局行号, 金币, 银币)]，按文件顺序
+    date_line_idx = set()   # 属于指定日期的行号
+    if os.path.isfile(info_path):
+        for i, line in enumerate(open(info_path, encoding="utf-8", errors="replace")):
+            m = re.search(r"账号:\s*(127\.0\.0\.1:\d+)\s*\|\s*金币:\s*(-?\d+)\s*\|\s*银币:\s*(-?\d+)", line)
+            if m:
+                by_port.setdefault(m.group(1), []).append((i, int(m.group(2)), int(m.group(3))))
+                if ymd_line in line:
+                    date_line_idx.add(i)
+        hit = False
+        for port in sorted(by_port):
+            recs = by_port[port]
+            date_recs = [r for r in recs if r[0] in date_line_idx]
+            if not date_recs:
+                continue
+            hit = True
+            cur = date_recs[-1]                    # 该端口指定日期内末条
+            pos = recs.index(cur)
+            prev = recs[pos - 1] if pos > 0 else None   # 该端口上一条（可跨日期）
+            if prev is None:
+                print("%-16s" % port + "  (无前一条，无法算 Δ)"); continue
+            (g0, s0), (g1, s1) = (prev[1], prev[2]), (cur[1], cur[2])
+            d = lambda n: ("+" + str(n)) if n >= 0 else str(n)
+            print("%-16s" % port + "".join("%-11s" % x for x in [g0, g1, d(g1 - g0), s0, s1, d(s1 - s0)]))
+        if not hit:
+            print(f"（{ymd_line} 无 account_info 记录）")
+    else:
+        print(f"（找不到 {info_path}）")
+    print("Δ = 本次(指定日期内末条) - 上次(其前一条)；负=净消耗。")
 
 
 # ============================================================================
@@ -1714,14 +1844,18 @@ def _new_job(mode):
             "started": time.time(), "ended": None, "mode": mode, "proc": None, "cancel_requested": False}
 
 
-def _spawn_job(job_id, mode, solo_tasks, solo_ids):
+def _spawn_job(job_id, body):
     """子进程跑 ``python run_5r.py <mode> [args]``；stdout 逐行读进 job['lines']。"""
+    mode = body.get("mode", "full")
     cmd = [sys.executable, os.path.abspath(__file__), mode]
     if mode == "solo":
-        if solo_ids:
-            cmd += ["--ids", ",".join(str(i) for i in sorted(solo_ids))]
-        if solo_tasks:
-            cmd += list(solo_tasks)
+        if body.get("solo_ids"):
+            cmd += ["--ids", ",".join(str(i) for i in sorted(body["solo_ids"]))]
+        if body.get("solo_tasks"):
+            cmd += list(body["solo_tasks"])
+    elif mode == "log_analysis":
+        if body.get("date"):
+            cmd += [str(body["date"])]
     print(f"    [{job_id}] spawn: {' '.join(cmd)}  (cwd={REPO_DIR})")
     proc = subprocess.Popen(cmd, cwd=REPO_DIR,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1854,14 +1988,14 @@ class _CliHandler(BaseHTTPRequestHandler):
                         _send_err(self, 409, f"busy: job {_CURRENT_JOB_ID} running；先 POST /jobs/{_CURRENT_JOB_ID}/cancel")
                         return
                 mode = body.get("mode", "full")
-                if mode not in ("full", "launch", "team", "form", "run", "fuben", "zhuagui", "solo"):
+                if mode not in ("full", "launch", "team", "form", "run", "fuben", "zhuagui", "solo", "log_analysis"):
                     _send_err(self, 400, f"bad mode {mode}"); return
                 job_id = datetime.now().strftime("%Y%m%d_%H%M%S")
                 with _JOBS_LOCK:
                     _JOBS[job_id] = _new_job(mode)
                     _CURRENT_JOB_ID = job_id
                 print(f">>> 接收任务 job_id={job_id} mode={mode}")
-                _spawn_job(job_id, mode, body.get("solo_tasks"), body.get("solo_ids"))
+                _spawn_job(job_id, body)
                 _send_json(self, {"job_id": job_id, "status_url": f"/jobs/{job_id}/status",
                                   "logs_url": f"/jobs/{job_id}/logs"}, code=202)
             elif path.startswith("/jobs/") and path.endswith("/cancel"):
@@ -1915,6 +2049,9 @@ def _remote_client(argv):
             body["solo_ids"] = sorted(ids)
         if tasks:
             body["solo_tasks"] = tasks
+    elif mode == "log_analysis":
+        if len(args) > 1:
+            body["date"] = args[1]
     print(f">>> 远程提交 {body} → {base}/run")
     try:
         r = requests.post(base + "/run", json=body, headers=headers, timeout=30)
@@ -1959,6 +2096,8 @@ if __name__ == "__main__":
     # 服务/客户端模式：在 TerminateProcess try 之前分流，各自独立退出（不经那套 finally）
     if _mode in ("-h", "--help", "help"):
         print_help(); sys.exit(0)
+    if _mode == "log_analysis":
+        print_log_analysis(_args[1] if len(_args) > 1 else None); sys.exit(0)
     if _mode == "mumu_server":
         sys.exit(run_mumu_server(_args[1:]))
     if _mode == "cli_server":
