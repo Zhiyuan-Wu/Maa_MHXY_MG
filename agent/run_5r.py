@@ -90,7 +90,7 @@ FUBEN_ENTRY    = "fuben115"            # 组队副本 entry（base 即 全自动
 # 启动（不耗计数器），抓鬼轮次计算-max 在每轮末尾命中一次再启下一轮——故 4 轮对应 max_hit=3。
 # standalone 的 post_task 不读 interface.json option，base 默认不挂限轮器（抓鬼一轮完成→队伍满员判断
 # 会无限循环），故 team_run 必须显式把 抓鬼一轮完成.next 改写到 抓鬼轮次计算-max。
-ZHUOGUI_ROUNDS = 2
+ZHUOGUI_ROUNDS = 4
 
 # 队长单人无限捉鬼模式的 override（``python run_5r.py zhuagui``）—— 对应 interface.json option
 # 「（开启/关闭）人员检测-（是否）进入轮次选择」→「关闭人员检测-不进入轮次选择」。
@@ -108,7 +108,7 @@ ZHUAGUI_OVERRIDE = {
 }
 # MUMU_MANAGER   = r"C:\Program Files\Netease\MuMu Player 12\nx_main\MuMuManager.exe"
 MUMU_MANAGER   = r"C:\Program Files\Netease\MuMu\nx_main\MuMuManager.exe"
-LAUNCH_STAGGER = 30                    # 启动错峰间隔秒数：ensure_instances 逐台拉 MuMu 实例、
+LAUNCH_STAGGER = 20                    # 启动错峰间隔秒数：ensure_instances 逐台拉 MuMu 实例、
                                        # launch_parallel 逐账号跑 start 登录，相邻两次都至少隔这么久（0=齐发）
 TIMEOUTS = {                           # 各步墙钟超时（秒）
     "start": 600, "chuangjianduiwu": 180, "duizhang": 600,
@@ -117,8 +117,11 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
     "solo_overall": 7200,  # 整轮 solo（全部账号×全部任务）的墙钟总超时；到点未完则收口退出
     "zhuagui": 14400,      # 队长无限捉鬼的墙钟安全帽（4h）；实际靠 Ctrl+C 停，到点 post_stop 收口
 }
-SOLO_ENTRIES = ["shuangbei", "fuli_qiandao", "shimen_renwu", "yunbiao_renwu2", "baotu_renwu", "wabaotu_qingli", "打开大地图_69副本",
+SOLO_ENTRIES = ["shuangbei", "huoli", "fuli_qiandao", "shimen_renwu_new", "yunbiao_renwu2", "baotu_renwu", "wabaotu_qingli", "打开大地图_69副本",
                 "mijing_renwu", "打开大地图_69副本", "sanjieqiyuan", "huoyue_lingqu", "zhengli_baibao", "jiayuan_zhengli", "huoli", "zhanghao_xinxi"]
+
+if datetime.now().weekday() == 3:
+    SOLO_ENTRIES.insert(0, "bangpai_renwu")
 if datetime.now().weekday() < 5:
     SOLO_ENTRIES.insert(0, "kejuxiangshi")
 
