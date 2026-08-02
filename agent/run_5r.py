@@ -1257,6 +1257,7 @@ def print_help():
     print("  log_analysis [YYYYMMDD|YYYY-MM-DD]   打印指定日期的耗时矩阵 + 账号信息变化矩阵（默认今天）")
     print("  服务/客户端：mumu_server（Win，adb:5038+API:5080）| cli_server（Mac，API:5090）|")
     print("    remote <mode> [args]（Win→Mac 提交；如 remote full / remote solo shimen_renwu_new --ids 1）")
+    print("    remote cancel    显式取消 cli_server 当前在跑的任务（Ctrl+C 只断开，任务继续在 Mac 跑）")
     print("\n常用单人任务名（solo 可指定）：")
     for k, v in SOLO_TASKS_HELP.items():
         print(f"  {k:18} {v}")
@@ -2042,6 +2043,34 @@ def _remote_client(argv):
     headers = {"Authorization": "Bearer " + SHARED_TOKEN} if SHARED_TOKEN else {}
     args = list(argv or [])
     mode = args[0] if args else "full"
+
+    # ---- 显式取消：remote cancel —— 取消 cli_server 当前在跑的 job（job 在 Mac，独立于本客户端）----
+    if mode == "cancel":
+        try:
+            h = requests.get(base + "/health", headers=headers, timeout=10).json()
+        except Exception as e:
+            print(f"!! 连不上 cli_server（{base}）：{e}"); return 1
+        jid = h.get("current_job")
+        if not jid:
+            print("（cli_server 当前无任务在跑）"); return 0
+        print(f">>> 取消当前任务 job_id={jid}")
+        try:
+            c = requests.post(f"{base}/jobs/{jid}/cancel", headers=headers, timeout=15)
+            ok = c.status_code == 200 and c.json().get("ok", False)
+            print(f"    cancel HTTP {c.status_code} → {'成功' if ok else c.text}")
+            if not ok:
+                return 1
+        except Exception as e:
+            print(f"!! 远程 cancel 发送失败：{e}"); return 1
+        try:
+            time.sleep(3)   # 等 cancel 落地（子进程被 SIGTERM/SIGKILL + 槽位释放）
+            s = requests.get(f"{base}/jobs/{jid}/status", headers=headers, timeout=10).json()
+            print(f"=== job 终态：{s.get('state')} exit={s.get('exit')} ===")
+        except Exception:
+            pass
+        return 0
+
+    # ---- 提交任务 + 轮询日志 ----
     body = {"mode": mode}
     if mode == "solo":
         ids, tasks = _parse_ids_flag(args[1:])
@@ -2062,32 +2091,37 @@ def _remote_client(argv):
     if r.status_code != 202:
         print(f"!! /run 失败 {r.status_code}：{r.text}"); return 1
     job_id = r.json()["job_id"]
-    print(f"<<< 已提交 job_id={job_id}；轮询日志（Ctrl+C 退出，不取消任务）...")
+    print(f"<<< 已提交 job_id={job_id}；轮询日志（Ctrl+C 断开，**任务继续在 Mac 跑**；取消用 `remote cancel`）...")
     since = 0
-    while True:
-        try:
-            lr = requests.get(f"{base}/jobs/{job_id}/logs",
-                              params={"since": since}, headers=headers, timeout=10)
-            for line in lr.text.splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    obj = json.loads(line)
-                    print(obj.get("t", ""))
-                    since = max(since, int(obj.get("i", since)) + 1)
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"!! 拉日志失败（继续）：{e}")
-        try:
-            s = requests.get(f"{base}/jobs/{job_id}/status", headers=headers, timeout=10).json()
-        except Exception as e:
-            print(f"!! 查状态失败（继续）：{e}"); time.sleep(2); continue
-        st = s.get("state")
-        if st in ("done", "failed", "cancelled", "not_found"):
-            print(f"=== job 终态：{st} exit={s.get('exit')} ===")
-            return 0 if st == "done" else 1
-        time.sleep(2)
+    try:
+        while True:
+            try:
+                lr = requests.get(f"{base}/jobs/{job_id}/logs",
+                                  params={"since": since}, headers=headers, timeout=10)
+                for line in lr.text.splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        print(obj.get("t", ""))
+                        since = max(since, int(obj.get("i", since)) + 1)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"!! 拉日志失败（继续）：{e}")
+            try:
+                s = requests.get(f"{base}/jobs/{job_id}/status", headers=headers, timeout=10).json()
+            except Exception as e:
+                print(f"!! 查状态失败（继续）：{e}"); time.sleep(2); continue
+            st = s.get("state")
+            if st in ("done", "failed", "cancelled", "not_found"):
+                print(f"=== job 终态：{st} exit={s.get('exit')} ===")
+                return 0 if st == "done" else 1
+            time.sleep(2)
+    except KeyboardInterrupt:
+        # 客户端断开即可——任务在 Mac 的 cli_server 子进程里继续跑，不受本客户端生命周期影响。
+        print("\n=== 已断开（任务继续在 Mac 跑）；如需取消：python run_5r.py remote cancel ===")
+        return 0
 
 
 if __name__ == "__main__":
