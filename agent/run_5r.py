@@ -1180,15 +1180,19 @@ def team_dungeon(taskers, member_names, fuben_entry=FUBEN_ENTRY, timeouts=None):
 
 # ---------------- 能力 3：并行单人 pipeline ----------------
 
-def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=None):
+def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=None, solo_timeouts=None):
     """5 账号**并行**执行单人 pipeline；每个账号内**顺序**跑 ``entries``。
 
     ids: ``None``=全部账号；或账号 id 集合（1-based，按 ``ROLES`` 顺序，连接日志里有 ``[id] 角色``）。
 
-    两层超时：
-      - ``per_timeout``：单个任务墙钟超时（``run_task`` 内 ``post_stop`` 收口）。
+    超时：
+      - ``per_timeout``：单个任务的**默认**墙钟超时（``run_task`` 内 ``post_stop`` 收口）。
+      - ``solo_timeouts``：可选 ``{entry: 秒}`` —— 对**指定单人任务**覆盖超时；没列到的任务回退
+        ``per_timeout``。``main()`` 里从 ``TIMEOUTS`` 构造：``TIMEOUTS.get(entry, TIMEOUTS['solo'])``，
+        于是可在 ``TIMEOUTS`` 里给任意 SOLO_ENTRIES 精细设超时（如 ``"bangpai_renwu": 3600``），
+        没有的自动回退 ``"solo": 2400``。
       - ``overall_timeout``：**整轮 solo** 墙钟总超时。到点后各账号当前任务被收口、后续任务不再执行。
-        实现是"收缩式"：每个任务实际 timeout = ``min(per_timeout, 距整轮截止的剩余时间)``，于是
+        实现是"收缩式"：每个任务实际 timeout = ``min(单任务超时, 距整轮截止的剩余时间)``，于是
         ``run_task`` 现有的单任务超时机制自然把整轮截止传到每个任务——无需额外看门狗线程，整轮
         截止被各账号在 ~1s 轮询粒度内一致地兑现。
     """
@@ -1200,6 +1204,9 @@ def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=
     print(f">>> 并行单人（每账号顺序跑 {entries}；单任务≤{per_timeout}s"
           + (f"，整轮≤{overall_timeout}s" if overall_timeout else "")
           + f"）对象: {who}")
+    _custom = {e: v for e, v in (solo_timeouts or {}).items() if v != per_timeout and e in entries}
+    if _custom:
+        print("    自定义单任务超时: " + ", ".join(f"{k}={v}s" for k, v in _custom.items()))
     if not chosen:
         print("（未选中任何账号，跳过）")
         return
@@ -1212,7 +1219,8 @@ def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=
             if left is not None and left <= 0:
                 print(f"    [{role}] 整轮超时，停止后续单人任务")
                 return
-            this_to = per_timeout if left is None else min(per_timeout, left)
+            entry_to = (solo_timeouts or {}).get(e, per_timeout)
+            this_to = entry_to if left is None else min(entry_to, left)
             try:
                 run_task(t, e, timeout=this_to, label=f"[{role}] 单人 {e}")
             except Exception:
@@ -1601,7 +1609,9 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
         solo_entries = solo_tasks or SOLO_ENTRIES
         print("=== 并行单人 pipeline ===")
         solo_all(taskers, entries=solo_entries, ids=solo_ids,
-                 per_timeout=timeouts["solo"], overall_timeout=timeouts["solo_overall"])
+                 per_timeout=timeouts["solo"], overall_timeout=timeouts["solo_overall"],
+                 solo_timeouts={e: timeouts.get(e, timeouts["solo"])
+                                for e in solo_entries if e in timeouts})
 
     # full 模式跑完
     if mode == "full":
