@@ -69,6 +69,25 @@ from maa.pipeline import JRecognitionType, JTemplateMatch
 
 _IS_WINDOWS = sys.platform == "win32"
 
+if _IS_WINDOWS:
+    # 全局禁止子进程新建控制台窗口：本脚本可能以**无控制台**方式跑（mumu_server 被 detached/
+    # 后台拉起），此时 subprocess 跑 adb.exe / MuMuManager.exe / netstat 等控制台程序会各自
+    # 弹出一个秒开秒关的控制台窗口并抢占前台。CREATE_NO_WINDOW 让所有子进程不创建新窗口
+    # （也覆盖 MaaFw 内部 spawn 的 adb）。本地终端跑不受影响（父进程有控制台、子进程继承）。
+    _sub_run, _sub_popen = subprocess.run, subprocess.Popen
+    _CREATE_NO_WINDOW = 0x08000000
+
+    def _sub_run_nw(args, *a, **kw):
+        kw.setdefault("creationflags", _CREATE_NO_WINDOW)
+        return _sub_run(args, *a, **kw)
+
+    def _sub_popen_nw(*a, **kw):
+        kw.setdefault("creationflags", _CREATE_NO_WINDOW)
+        return _sub_popen(*a, **kw)
+
+    subprocess.run = _sub_run_nw
+    subprocess.Popen = _sub_popen_nw
+
 # native 崩溃（段错误 / abort / 访问违例）时，把出错线程的 Python 栈打到 stderr。
 # 用于定位"进程静默退出、无任何 traceback"的情况——多半是 C++ 侧（MaaFw/OCR 模型）
 # 崩了，Python 的 except/finally 根本跑不到。不加这个，这种死法完全无线索。
@@ -1258,6 +1277,7 @@ def print_help():
     print("  服务/客户端：mumu_server（Win，adb:5038+API:5080）| cli_server（Mac，API:5090）|")
     print("    remote <mode> [args]（Win→Mac 提交；如 remote full / remote solo shimen_renwu_new --ids 1）")
     print("    remote cancel    显式取消 cli_server 当前在跑的任务（Ctrl+C 只断开，任务继续在 Mac 跑）")
+    print("    remote show      显示 cli_server 当前在跑的任务 + 最近日志尾")
     print("\n常用单人任务名（solo 可指定）：")
     for k, v in SOLO_TASKS_HELP.items():
         print(f"  {k:18} {v}")
@@ -1944,6 +1964,18 @@ class _CliHandler(BaseHTTPRequestHandler):
                             "started": j["started"], "ended": j["ended"], "exit": j["exit"]}
                            for jid, j in _JOBS.items()]
                 _send_json(self, {"jobs": lst})
+            elif path == "/show":
+                # 当前（或最近）任务 + 最近 50 行日志尾
+                with _JOBS_LOCK:
+                    jid = _CURRENT_JOB_ID or (sorted(_JOBS)[-1] if _JOBS else None)
+                    if not jid:
+                        _send_json(self, {"ok": True, "running": False, "job_id": None, "lines": []})
+                        return
+                    j = _JOBS[jid]
+                    tail = [ln["t"] for ln in j["lines"][-50:]]
+                    _send_json(self, {"ok": True, "running": j["state"] == "running", "job_id": jid,
+                                      "state": j["state"], "mode": j["mode"], "exit": j["exit"],
+                                      "started": j["started"], "ended": j["ended"], "lines": tail})
             elif path.startswith("/jobs/") and path.endswith("/status"):
                 jid = path[len("/jobs/"):-len("/status")]
                 with _JOBS_LOCK:
@@ -2068,6 +2100,20 @@ def _remote_client(argv):
             print(f"=== job 终态：{s.get('state')} exit={s.get('exit')} ===")
         except Exception:
             pass
+        return 0
+
+    # ---- show：服务端当前在跑的任务 + 日志尾 ----
+    if mode == "show":
+        try:
+            sh = requests.get(base + "/show", headers=headers, timeout=10).json()
+        except Exception as e:
+            print(f"!! 连不上 cli_server（{base}）：{e}"); return 1
+        print(f"=== cli_server 任务（job={sh.get('job_id')} state={sh.get('state')} mode={sh.get('mode')} "
+              f"running={sh.get('running')} exit={sh.get('exit')}）===")
+        for t in sh.get("lines", []):
+            print(t)
+        if not sh.get("lines"):
+            print("（无日志）")
         return 0
 
     # ---- 提交任务 + 轮询日志 ----
