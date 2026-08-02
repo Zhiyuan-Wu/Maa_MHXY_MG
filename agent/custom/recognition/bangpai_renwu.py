@@ -23,8 +23,8 @@ class BangpaiRenwuDecide(CustomRecognition):
     _REACQUIRE_ENTRY = "主界面-领取帮派任务"   # 放弃后重新领取的链路入口（主界面→活动→参加→领取）
     _ACCEPT_KEYWORD = ["青龙", "白虎", "朱雀", "玄武"]
     _DEFAULT_ROI = [1034, 171, 235, 336]
-    _DEFAULT_BLACKLIST = ["金香玉", "九转", "蛇胆", "长寿", "珍露"]
-    _DEFAULT_BLACKLIST_AFTER8 = ["蛇胆"]
+    _DEFAULT_BLACKLIST = ["金香玉", "九转", "蛇胆酒", "长寿面", "珍露酒"]
+    _DEFAULT_BLACKLIST_AFTER8 = ["蛇胆酒"]
 
     def analyze(
         self,

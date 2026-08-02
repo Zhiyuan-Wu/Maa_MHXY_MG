@@ -116,6 +116,8 @@
             "[JumpBack]任务分支-药店-购买",
             "[JumpBack]师门任务-任务分支-抄本",
             "[JumpBack]任务分支-摆摊购买",
+            "[JumpBack]师门任务-任务分支-问答",
+            "[JumpBack]清理主界面使用-关闭",
             "[JumpBack]战斗中-等待10秒",
             "[JumpBack]师门任务-单次点击-v2",
             "[JumpBack]师门完成-九转天阶遮挡",
@@ -124,15 +126,17 @@
             "[JumpBack]关闭X9联赛弹窗",
             "[JumpBack]跳过剧情动画-快进键",
             "[JumpBack]关闭三界热点",
-            "[JumpBack]帮派-间隔20秒-最大10分钟",
+            "[JumpBack]师门-间隔3秒-最大10分钟",
             "panduan_zhujiemian"
         ]
     },
     "师门任务-单次点击-v2": {
         "recognition": "Custom",
-        "custom_recognition": "shimen_renwu_decide",
-        "action": "Click",
-        "post_delay": 7000
+        "custom_recognition": "shimen_renwu_decide"
+    },
+    "师门-间隔3秒-最大10分钟": {
+        "max_hit": 200,
+        "pre_delay": 3000
     },
     "师门任务-任务分支-兵器铺购买": {
         "recognition": "OCR",
@@ -163,6 +167,59 @@
         "post_delay": 2000,
         "action": "Click"
     },
+    "师门任务-任务分支-问答": {
+        "recognition": "OCR",
+        "expected": [
+            "请选择正确答案"
+        ],
+        "roi": [
+            876,
+            5,
+            311,
+            544
+        ],
+        "next": [
+            "师门任务-问答-点击",
+            "师门任务-任务分支-问答兜底点第一个"
+        ]
+    },
+    "师门任务-任务分支-问答兜底点第一个": {
+        "recognition": "OCR",
+        "expected": [
+            "请选择正确答案"
+        ],
+        "roi": [
+            876,
+            5,
+            311,
+            544
+        ],
+        "action": "Click",
+        "target_offset": [
+            100,
+            80,
+            -50,
+            0
+        ]
+    },
+    "师门任务-问答-点击": {
+        "recognition": "OCR",
+        "expected": [
+            "孔雀石",
+            "6",
+            "30级",
+            "10个",
+            "百炼精铁"
+        ],
+        "roi": [
+            876,
+            25,
+            321,
+            524
+        ],
+        "action": "Click",
+        "post_delay": 1000
+    },
     "师门任务-任务分支-对话": {
         "recognition": "OCR",
         "expected": [
@@ -175,7 +232,27 @@
             544
         ],
         "next": [
-            "师门任务-对话-点击"
+            "师门任务-对话-点击",
+            "师门任务-任务分支-对话兜底点第一个"
+        ]
+    },
+    "师门任务-任务分支-对话兜底点第一个": {
+        "recognition": "OCR",
+        "expected": [
+            "选择要做的事"
+        ],
+        "roi": [
+            876,
+            5,
+            311,
+            544
+        ],
+        "action": "Click",
+        "target_offset": [
+            100,
+            80,
+            -50,
+            0
         ]
     },
     "师门任务-对话-点击": {
@@ -186,7 +263,7 @@
             "首席请",
             "请赐教",
             "看招",
-            "等等", //方寸
+            "等等"
         ],
         "roi": [
             876,
@@ -200,9 +277,11 @@
     "师门任务-任务分支-抄本": {
         "recognition": "OCR",
         "expected": [
-            "法册", //雷音
+            "雷音法册", //雷音
             "笔墨纸砚", //方寸
             "秘术镜", //普陀
+            "狮驼", //狮驼
+            // "李记食谱", //寻趣剧情
         ],
         "roi": [
             1025,
@@ -217,6 +296,31 @@
             67,
             36
         ]
+    },
+    "师门任务-任务分支-抄本兜底-入口": {
+        "next": [
+            "师门任务-任务分支-抄本兜底",
+            "空节点"
+        ]
+    },
+    "师门任务-任务分支-抄本兜底": {
+        "recognition": "TemplateMatch",
+        "template": "zonghe/zhujiemian_shiyong_cha.png",
+        "roi": [
+            1135,
+            369,
+            50,
+            46
+        ],
+        "pre_delay": 200,
+        "action": "Click",
+        "target": [
+            1060,
+            560,
+            67,
+            36
+        ],
+        "post_delay": 1000
     },
     "师门完成确定-图片识别-v2": {
         "recognition": "TemplateMatch",
