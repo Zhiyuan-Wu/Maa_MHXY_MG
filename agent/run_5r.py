@@ -48,6 +48,7 @@ from maa.toolkit import Toolkit
 from maa.resource import Resource
 from maa.controller import AdbController
 from maa.tasker import Tasker
+from maa.pipeline import JRecognitionType, JTemplateMatch
 
 # native 崩溃（段错误 / abort / 访问违例）时，把出错线程的 Python 栈打到 stderr。
 # 用于定位"进程静默退出、无任何 traceback"的情况——多半是 C++ 侧（MaaFw/OCR 模型）
@@ -671,7 +672,8 @@ def _save_timeout_screenshot(tasker, label):
     """
     try:
         ctrl = tasker.controller
-        img = ctrl.post_screencap().wait().result   # BGR ndarray（可能 None / 空）
+        img = ctrl.post_screencap().wait().get()    # BGR ndarray（可能 None / 空）；.get() 不是 .result
+                                                    # （JobWithResult 无 result 属性，访问器是 .get）
         if img is None or getattr(img, "size", 0) == 0:
             print(f"    （超时截图：空图像，跳过 [{label}]）")
             return
@@ -690,7 +692,8 @@ def _save_timeout_screenshot(tasker, label):
         print(f"    （超时截图失败，忽略 [{label}]：{e}）")
 
 
-def run_task(tasker, entry, override=None, timeout=600, label=None):
+def run_task(tasker, entry, override=None, timeout=600, label=None, watch_alive=None,
+             watch_dead_streak=3):
     """跑一个**原生** entry，带墙钟超时：超时则 ``post_stop`` 中断。返回是否在超时内完成。
 
     自动合并 ``DEFAULT_OVERRIDES`` 里的项目建议默认值（如运镖跳过活力检测）。
@@ -698,6 +701,15 @@ def run_task(tasker, entry, override=None, timeout=600, label=None):
 
     超时收口时顺带抓一张当前画面存盘（``_save_timeout_screenshot``）——墙钟超时被 stop 强停
     不触发 pipeline 的 on_error 截图，补一张便于事后定位"卡在哪一帧"。
+
+    ``watch_alive``：可选 ``() -> bool`` 游戏存活探针。任务运行中若探针**连续**
+    ``watch_dead_streak`` 秒返回 False（如游戏被 force-stop 杀死 / 崩溃不再重启），**提前**
+    ``post_stop`` 止损返回 False——避免 start 这类长任务对着死游戏空等满墙钟超时（600s），把恢复
+    快速交给上层 L1/L3。start/panduan 场景传 ``lambda: _game_process_alive(adb, address, package)``。
+
+    ``watch_dead_streak`` 默认 3：要求**连续** 3 次探针 False 才判"游戏已死"。必须——pidof 瞬时为空
+    （进程崩溃后自动重启的空窗）或 adb 抖动（恢复阶段 adb 操作密集）都会让单次 False 误报，过早
+    掐断本可自己恢复的 start。连续 3s 才置信，仍能抓住真正被 force-stop 杀死的情况（~43s→~46s）。
     """
     label = label or entry
     ov = dict(override or {})
@@ -708,11 +720,22 @@ def run_task(tasker, entry, override=None, timeout=600, label=None):
     job = tasker.post_task(entry, ov)
     _t0 = time.time()
     deadline = _t0 + timeout
+    dead_streak = 0
     while time.time() < deadline:
         done = job.done  # 读这个属性会进 MaaFw native；若进程在这附近崩，faulthandler 会在 stderr 打栈
         if done:
             print(f"<<< {label} 完成（用时 {int(time.time() - _t0)}s）")
             return True
+        if watch_alive is not None:
+            if not watch_alive():
+                dead_streak += 1
+                if dead_streak >= watch_dead_streak:
+                    tasker.post_stop().wait()
+                    _save_timeout_screenshot(tasker, label)
+                    print(f"!!! {label} 游戏进程持续死亡 {watch_dead_streak}s，提前 stop（用时 {int(time.time() - _t0)}s）")
+                    return False
+            else:
+                dead_streak = 0
         time.sleep(1)
     tasker.post_stop().wait()
     _save_timeout_screenshot(tasker, label)  # stop 后补一张超时截图（兜底循环不触发 on_error 的场景必备）
@@ -720,42 +743,272 @@ def run_task(tasker, entry, override=None, timeout=600, label=None):
     return False
 
 
+# ---------------- 启动就绪哨兵：主界面确认 + L1/L3 自愈 ----------------
+# ensure_instances/ensure_process 只能保证"设备开机 + 游戏进程存活"，抓不住:
+#   A. 起来 >10s 后闪退（pidof 双重检查的 10s 窗口早过）；
+#   B. 卡死（进程活着但 UI 黑屏 / 登录卡住 / 卡 ProtocolLauncher，永远到不了主界面）。
+# 且 launch 跑的 start/panduan 的 done-status 不可信（default_pipeline 全局 on_error:["空节点"]
+# 让 next 超时也"成功"）。故这里用**独立哨兵** tasker.post_recognition 做权威判定：
+# 它是纯识别、无 pipeline 节点 / 无 next / 无 on_error，job.succeeded 即真实命中，绕开空节点陷阱。
+# （Or 复合识别若以后要用：any_of 元素须 JRecognition(type=,param=) 包裹，否则序列化缺 type 判别。）
+
+# 就绪判据：仅"主界面"。start 跑完后只该看到主界面；若还看得到"登录游戏"= start 没点进去
+# （登录卡住 / 崩了）→ 失败、走 L1/L3。**绝不能把"看到登录游戏"当成功**。
+_MAIN_RECO = JTemplateMatch(
+    template=["zonghe/jiahao.png", "zonghe/chenghao.png",
+              "zonghe/baoguo.png", "zonghe/baoguo_man.png"],
+    roi=[1197, 540, 78, 157], threshold=[0.7])
+
+
+def _screencap(tasker):
+    """截一帧；失败返 None。
+
+    cached_image 在截图失败时**抛 RuntimeError** 而非返 None（见 maa/controller.py），故必须
+    try/except，否则会崩掉外层的轮询循环。截图通道被 pipeline 占着时也可能异常——交给上层重试。
+    """
+    try:
+        img = tasker.controller.post_screencap().wait().get()    # .get() 返回 ndarray;别用 .result——
+                                                                 # JobWithResult 没有该属性(post_screencap 文档
+                                                                 # "可通过 result 获取"是误导,访问器实为 .get)
+    except Exception as e:
+        print(f"    （哨兵截图失败，跳过本轮：{e}）")
+        return None
+    if img is None or getattr(img, "size", 0) == 0:
+        return None
+    return img
+
+
+def _recognize(tasker, reco_type, reco_param, img):
+    """对**给定帧**跑一次性识别，返回是否命中（job.succeeded）。识别异常 → False。"""
+    try:
+        job = tasker.post_recognition(reco_type, reco_param, img)
+        job.wait()
+        return bool(job.succeeded)
+    except Exception as e:
+        print(f"    （哨兵识别异常，按未命中：{e}）")
+        return False
+
+
+def _game_focused(adb, address, timeout=8):
+    """adb 核对前台窗口是否为**游戏主活动**（com.netease.game.MessiahNativeActivity）。
+
+    返回 True=游戏主活动在前台；False=明显不是（ProtocolLauncher / 启动器 / 系统 UI / ANR 弹窗）；
+    None=查询自身失败（adb 不稳）——此时**不否决**，交给帧差/模板判据。
+
+    为什么需要：6130 卡 ANR 时 focus=ProtocolLauncher（也在 com.netease.my 包下），且
+    post_screencap 会吐陈旧主界面帧 → 模板假命中。focus 是独立于 Maa 截图的 ground truth。
+    """
+    try:
+        cp = subprocess.run([adb, "-s", address, "shell", "dumpsys", "window"],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=timeout)
+    except Exception:
+        return None
+    if cp.returncode != 0:
+        return None
+    for line in cp.stdout.splitlines():
+        if "mCurrentFocus" in line:
+            return "MessiahNativeActivity" in line
+    return None   # 找不到 focus 行（极少见），当不确定
+
+
+# 就绪判据的核心：start 跑完后必须在**活着的主界面**。
+# 单凭"主界面模板命中"不够——卡死/ANR 时 post_screencap 会吐陈旧主界面帧导致假命中
+# （2026-08-02 实测：6130 卡系统 ANR 弹窗，哨兵仍报"登录就绪"，整跑误判全成功）。
+# 故模板命中后再加两道独立确认：
+#   ① 帧差：隔 live_gap 秒再截一帧，必须与上一帧**不同**（主界面有环境动画→必变；
+#      冻结 / ANR 静态弹窗 / 陈旧缓存帧 → 完全相同）。
+#   ② focus：前台必须是游戏主活动 MessiahNativeActivity（独立于 Maa 截图）。
+def _ready_main(tasker, adb, address, live_gap=2.5):
+    """权威就绪：主界面模板命中 + 画面在变（非冻结/陈旧）+ 游戏主活动在前台。
+
+    只在模板命中后才做（昂贵的）帧差 + focus 确认——模板 miss 直接 False（快路径），不白等 live_gap。"""
+    img = _screencap(tasker)
+    if img is None:
+        return False
+    if not _recognize(tasker, JRecognitionType.TemplateMatch, _MAIN_RECO, img):
+        return False   # 模板 miss：快路径
+    # 模板命中 → 活性①：再截一帧，必须不同
+    time.sleep(live_gap)
+    img2 = _screencap(tasker)
+    if img2 is None or img.tobytes() == img2.tobytes():
+        print(f"    [{address}] 主界面模板命中但画面未变（疑冻结/陈旧帧）→ 未就绪")
+        return False
+    # 活性②：focus 必须是游戏主活动（None=查询失败时不下结论，交给①）
+    if _game_focused(adb, address) is False:
+        print(f"    [{address}] 前台非游戏主活动（疑 ANR/启动器/弹窗）→ 未就绪")
+        return False
+    return True
+
+
+def _restart_instance(adb, address, idx, package, boot_come_up=180):
+    """L3：实例级重启（shutdown + launch + 等 adb + monkey 拉游戏）。
+
+    走和冷启动同款路径，专治"脏实例"死结——长跑过的实例上 force-stop+monkey 重启游戏会卡在
+    ProtocolLauncher / 停在后台 Android 主界面，MaaFw 对该 activity 取不到 display id
+    （截图/点击全废，start 必超时）。实例级重启给一个干净 Android 启动，游戏才会正常进主界面。
+
+    **不走 _adb_reset**：kill-server 是全局的，会扰动并发的其它 4 个账号；这里只用 per-address
+    的 _adb_ready（connect + boot_completed）。
+    """
+    print(f"!!! [{address}] L3 实例级重启（shutdown idx{idx} + launch + monkey）")
+    try:
+        _shutdown_one(idx)
+    except Exception as e:
+        print(f"    [{address}] shutdown 异常（忽略继续）：{e}")
+    time.sleep(6)
+    try:
+        _launch_one(idx, package)
+    except Exception as e:
+        print(f"    [{address}] launch 异常：{e}")
+    if not _wait_for(lambda: _adb_ready(adb, address), boot_come_up, interval=3):
+        print(f"    [{address}] L3 后 adb 未就绪")
+        return False
+    if not _game_process_alive(adb, address, package):
+        _start_game_process(adb, address, package)   # launch -pkg 不保证在运行实例上拉起游戏
+    _wait_for(lambda: _game_process_alive(adb, address, package), 40, interval=2)
+    return True
+
+
 # ---------------- 能力 1：启动一个账号 ----------------
 
-def launch(tasker, package=PACKAGE, timeout=240):
-    """任意状态→主界面。
+def launch(tasker, package=PACKAGE, timeout=240, address=None):
+    """任意状态→主界面，**返回权威就绪判定**（经主界面哨兵确认，不信 start/panduan 的 done-status）。
 
-    ``start``（StartApp + 登录流程）+ ``panduan_zhujiemian``（Back 清场到主界面）。
+    ``start``（StartApp + 登录流程）+ ``panduan_zhujiemian``（Back 清场到主界面）跑完后，用独立哨兵
+    ``_ready_main`` 确认**活着的主界面**已呈现（模板 + 帧差 + focus）：就绪 = True；否则返 False，
+    **由上层 ``_launch_account`` 升级 L3（实例级重启 + 重连 tasker + 重试）**。start 会点登录游戏，
+    故跑完后**只该看到主界面**——还看得到登录游戏即 start 失败，不算就绪。
 
     已登录出口在资源层：``start.json`` 的 ``启动游戏.next`` 首候选是 ``主界面``（定义在
     ``my_task.json``，纯模板检测、无 action、命中即结束）——已登录账号不再空转 timeout。
-    这里只剩一个 override：修正 ``启动游戏.package``（start.json 里写的 ``myq`` 是错的）。
+
+    ``address`` 由 ``launch_parallel`` 从 ``ROLES`` 注入（adb force-stop / 哨兵地址用）；为 None
+    时（zhuagui 单账号旧路径）退化为只 start、不哨兵，沿用旧行为。
     """
+    adb = _adb_path()
+    _watch = (lambda: _game_process_alive(adb, address, package)) if address is not None else None
     run_task(tasker, "start", override={"启动游戏": {"package": package}},
-             timeout=timeout, label="start 启动/登录")
-    return run_task(tasker, "panduan_zhujiemian", timeout=120, label="panduan_zhujiemian 清场到主界面")
+             timeout=timeout, label="start 启动/登录", watch_alive=_watch)
+    run_task(tasker, "panduan_zhujiemian", timeout=120, label="panduan_zhujiemian 清场到主界面",
+             watch_alive=_watch)
+    if address is None:
+        return True   # 退化路径（无 address 不哨兵）：仅 zhuagui 单账号，保留旧行为
+    # 权威判定：start 跑完后必须在**活着的主界面**（模板 + 帧差 + focus）。不是 → 返 False，
+    # 由上层 _launch_account 升级 L3（实例级重启 + 重连 tasker + 重试）。无 L1——L3 严格优于它。
+    if _wait_for(lambda: _ready_main(tasker, adb, address), 60, 3):
+        print(f"<<< [{address}] 已就绪（主界面 + 活性 + focus 确认）")
+        return True
+    print(f"!!! [{address}] start 后未到活着的主界面")
+    return False
 
 
-def launch_parallel(taskers, package=PACKAGE, timeout=240, stagger=10):
-    """并行启动多账号，每个相隔 ``stagger`` 秒（错峰 submit）。
+def _reconnect_tasker(old_tasker, address):
+    """实例重启后重建 tasker：**复用旧 Resource**（OCR 模型不重载、不占额外内存——5 开内存紧张时
+    关键），只新建 Controller 连到重启后的实例 + 新 Tasker。
 
-    每个账号在独立线程里跑 ``launch``；按 ``taskers`` 顺序 submit，相邻两次 submit 之间
-    sleep ``stagger`` 秒。错峰而非齐发：各账号虽各自独立 Resource（已无 OCR 模型并发竞态），
-    但 5 个 StartApp + 游戏进程同时拉起会瞬间压满宿主 CPU/磁盘/ADB；错峰 10s 让前一个越过
-    StartApp 的 20s post_delay 再起下一个，整体更稳。设 0 即齐发。
-    wall-clock 从 N×单账号（顺序）降到 stagger×(N-1) + 单账号。
+    为什么需要：实例重启后旧 tasker 的 runner 会失效（``task_id_to_runner_id runner id not found``，
+    run_task 跑不了）；但 Resource（pipeline JSON + OCR 模型）与实例无关、可复用。复用而非重建省
+    ~0.1GB/号的 OCR 模型内存 + 几秒加载。**不做 kill-server**（会扰动并发的其它账号）。
+    """
+    Toolkit.init_option(DEBUG_DIR)
+    found = {d.address: d for d in Toolkit.find_adb_devices()}
+    if address not in found:
+        print(f"    [{address}] 重连失败：实例未在 adb 设备列表")
+        return None
+    dev = found[address]
+    ctrl = AdbController(adb_path=str(dev.adb_path), address=dev.address,
+                         screencap_methods=dev.screencap_methods, input_methods=dev.input_methods,
+                         config=dev.config)
+    ctrl.post_connection().wait()
+    t = Tasker()
+    t.bind(old_tasker.resource, ctrl)   # 复用旧 Resource（OCR 模型不重载）
+    if not t.inited:
+        print(f"    [{address}] 重连后 tasker 未就绪")
+        return None
+    return t
+
+
+def _launch_account(tasker, role, address, package=PACKAGE, timeout=240):
+    """单账号完整启动阶梯：``launch`` 失败（start 没把游戏带到主界面）→ 直接升级 L3（实例级重启
+    + 复用 Resource 重连 tasker + 重试 launch）。返回 ``(是否就绪, L3 后的新 tasker 或 None)``。
+
+    为什么没有 L1：实测 L1（force-stop+monkey 重启游戏）在**脏实例**上必败——游戏重启后卡
+    ProtocolLauncher / 停在后台 Android 主界面，MaaFw 取不到 display id，start 白跑满超时（~150s）
+    才升级。L3 实例级重启给干净 Android 启动，start 才能正常把游戏带到主界面（多轮实测）。L3
+    严格优于 L1，故砍掉 L1，失败即 L3，机制精简且更快（省 L1 那 150s）。
+
+    内存安全：L3 复用旧 Resource（OCR 模型不重载）；shutdown 实例时还释放该实例 ~3-4GB 再重分配。
+    """
+    try:
+        if launch(tasker, package, timeout, address):
+            return True, None
+    except Exception as e:
+        print(f"!!! [{role}] launch 异常：{e}")
+    print(f"!!! [{role}] launch 未就绪，升级 L3 实例级重启 + 重连 tasker")
+    adb = _adb_path()
+    idx = (int(address.rsplit(":", 1)[1]) - 16384) // 32   # MuMu 约定 adb_port = 16384 + 32*idx
+    if not _restart_instance(adb, address, idx, package):
+        return False, None
+    new_t = _reconnect_tasker(tasker, address)
+    if new_t is None:
+        print(f"!!! [{role}] L3 后重连 tasker 失败")
+        return False, None
+    try:
+        if launch(new_t, package, timeout, address):
+            print(f"<<< [{role}] 登录就绪（L3 实例级重启 + 重连救回）")
+            return True, new_t
+    except Exception as e:
+        print(f"!!! [{role}] L3 重连后 launch 异常：{e}")
+    print(f"!!! [{role}] L3 后仍未就绪")
+    return False, new_t
+
+
+def launch_parallel(taskers, package=PACKAGE, timeout=240, stagger=10, hard_cap=1800):
+    """并行启动多账号，**任一号未就绪即 raise RuntimeError、整跑中止**（列出全部失败号）。
+
+    每个账号在独立线程里跑 ``launch(address=ROLES[role])``；按 ``taskers`` 顺序 submit，相邻两次
+    sleep ``stagger`` 秒。错峰而非齐发：各账号虽各自独立 Resource（已无 OCR 模型并发竞态），但
+    5 个 StartApp + 游戏进程同时拉起会瞬间压满宿主 CPU/磁盘/ADB；错峰让前一个越过 StartApp 的
+    post_delay 再起下一个，整体更稳。设 0 即齐发。
+
+    ``launch`` 返回 bool（就绪与否）、不抛；这里 ``f.result(timeout=hard_cap)`` 取 bool 并汇总。
+    ``hard_cap`` 是单账号整体墙钟上限——兜尾部风险：start/panduan 的 ``post_stop().wait()`` 在
+    adb/controller 楔死时会无限挂（``Job.wait`` 无 timeout），此处超时即把该号判失败、不拖死整跑。
+    挂死的线程由进程退出的 TerminateProcess 收掉（见 ``__main__``）。
+
+    任一号失败 → raise RuntimeError（消息含失败号列表）→ 传到 ``__main__`` 的 except → traceback +
+    exit 1，在 team_form / solo_all 之前中止。**不再带死实例跑全程**。
     """
     items = list(taskers.items())
-    print(f">>> 并行启动 {len(items)} 个账号（每个间隔 {stagger}s）")
+    print(f">>> 并行启动 {len(items)} 个账号（每个间隔 {stagger}s；单号含 L1/L3 自愈）")
+    outcomes = {}        # role -> (是否就绪, L3 后新 tasker 或 None)
     with ThreadPoolExecutor(max_workers=len(items)) as ex:
-        futs = []
+        futs = {}
         for i, (role, t) in enumerate(items):
             if i > 0:
                 time.sleep(stagger)
-            futs.append(ex.submit(launch, t, package, timeout))
-        for f in futs:
-            f.result()  # 任意账号抛异常会在此 re-raise
-    print(f"<<< 并行启动完成：{', '.join(r for r, _ in items)}")
+            futs[ex.submit(_launch_account, t, role, ROLES[role], package, timeout)] = role
+        for f, role in [(fu, futs[fu]) for fu in futs]:
+            try:
+                outcomes[role] = f.result(timeout=hard_cap)
+            except TimeoutError:
+                print(f"!!! [{role}] launch 超过 {hard_cap}s 未返回（疑 controller 楔死），判失败")
+                outcomes[role] = (False, None)
+            except Exception as e:
+                print(f"!!! [{role}] launch 异常：{e}")
+                outcomes[role] = (False, None)
+    # L3 重建过的 tasker 换回 dict（后续 team/solo 用新 tasker）；旧 tasker 丢引用由 GC 回收
+    for role, (_ok, new_t) in outcomes.items():
+        if new_t is not None:
+            taskers[role] = new_t
+    failed = [r for r, (ok, _) in outcomes.items() if not ok]
+    if failed:
+        raise RuntimeError(
+            f"以下账号登录未就绪，整跑中止：{failed}"
+            f"（其余 {len(items) - len(failed)} 台就绪）"
+            f"——请检查这几台 MuMu 的游戏是否崩 / 卡黑屏 / 登录卡死 / 实例内存不足，手动恢复后重跑。")
+    print(f"<<< 并行启动完成（全部就绪）：{', '.join(r for r, _ in items)}")
 
 
 # ---------------- 能力 2：组队副本（2-1 组队 / 2-2 执行副本+解散）----------------
@@ -990,7 +1243,8 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
         # 队长单人无限捉鬼：只需队长登录到主界面（关闭人员检测 → 不要求队伍满员），
         # 只 launch 队长一人，不起其余账号。
         print("=== 启动队长（登录到主界面）===")
-        launch(taskers["队长"], package=package, timeout=timeouts["start"])
+        launch(taskers["队长"], package=package, timeout=timeouts["start"],
+               address=ROLES["队长"])
         print("=== 队长无限捉鬼（关闭人员检测-不进入轮次选择）===")
         zhuagui(taskers)
 
