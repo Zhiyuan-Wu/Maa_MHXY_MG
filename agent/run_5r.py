@@ -37,11 +37,15 @@ import faulthandler
 import gc
 import json
 import os
+import socket
 import subprocess
 import sys
+import threading
 import time
 import traceback
+import urllib.parse
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
 
 from maa.toolkit import Toolkit
@@ -50,14 +54,17 @@ from maa.controller import AdbController
 from maa.tasker import Tasker
 from maa.pipeline import JRecognitionType, JTemplateMatch
 
+_IS_WINDOWS = sys.platform == "win32"
+
 # native 崩溃（段错误 / abort / 访问违例）时，把出错线程的 Python 栈打到 stderr。
 # 用于定位"进程静默退出、无任何 traceback"的情况——多半是 C++ 侧（MaaFw/OCR 模型）
 # 崩了，Python 的 except/finally 根本跑不到。不加这个，这种死法完全无线索。
 faulthandler.enable(all_threads=True)
 
 # ==================== 配置区（移动脚本 / 换机器时改这里）====================
-# 仓库根目录（须含 assets/ agent/）。脚本可放在任意位置——移走后只改这一行。
-REPO_DIR = r"C:\dev\Maa_MHXY_MG"
+# 仓库根目录（须含 assets/ agent/）。默认按 __file__ 推导（agent/run_5r.py 的上上级 = 仓库根），
+# 这样 Win/Mac 同一份代码都能跑；可用环境变量 MAA_5R_REPO 覆盖。
+REPO_DIR = os.environ.get("MAA_5R_REPO") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _load_dotenv():
@@ -140,6 +147,20 @@ KEJU_AI = {
 RESOURCE_PATH = os.path.join(REPO_DIR, "assets", "resource", "base")
 AGENT_DIR     = os.path.join(REPO_DIR, "agent")   # import custom（自定义识别/动作）
 DEBUG_DIR     = os.path.join(REPO_DIR, "debug")   # MaaFramework 工作目录 + 日志
+
+# ==================== 远端/服务模式配置（Mac 经 Tailscale 远控 Win MuMu）====================
+# 链路：Win 跑 mumu_server（专用 adb server + MuMu 生命周期 HTTP API，不加载 Maa 资源）；
+#       Mac 跑 cli_server（接收 CLI 指令、子进程跑 main()、Maa 资源仅在此加载）；
+#       Win 发 `remote <mode>` → Mac cli_server → 探测到远端 → 经 Win:5038 adb 驱动设备、
+#       经 Win:5080 API 管生命周期。详见 plan sleepy-inventing-pearl.md。
+WIN_IP   = "100.77.236.94"   # Win（MuMu 主机）Tailscale IP —— 跑 mumu_server
+MAC_IP   = "100.116.176.34"  # Mac（资源/执行）  Tailscale IP —— 跑 cli_server
+ADB_SERVER_PORT = 5038       # mumu_server 拉起的专用 0.0.0.0 adb server（绝不碰 MuMu 自管的 5037）
+MUMU_API_PORT   = 5080       # mumu_server 的 HTTP API（Win）
+CLI_API_PORT    = 5090       # cli_server  的 HTTP API（Mac）
+REMOTE_PROBE_TIMEOUT = 2.5   # main() 探测 mumu_server /health 的单次超时（秒）
+SHARED_TOKEN = os.environ.get("MAA_5R_TOKEN", "")   # 可选 bearer；空 = 不鉴权（Tailscale 即安全边界）
+# =========================================================================
 
 # 各 solo 任务的建议 pipeline_override（对照 interface.json 的 option 默认值 + 各 pipeline 裸默认）。
 # 仅在 run_task 未传同名 override 时补充（不覆盖调用方显式传的）。逐项依据：
@@ -560,6 +581,9 @@ def _double_check(check, cool_down=10, come_up=60):
 
 def _adb_reset(adb, addresses):
     """清 adb server 的 stale offline 缓存，再 ``connect`` 全部地址（幂等）。"""
+    # 触线：remote 模式根本不该进这里（ensure_instances/ensure_process 在 remote 走 RemoteBackend），
+    # 误入会 kill 掉共享的 Win:5038 adb server 甚至 MuMu 的 5037。见 plan §D/R2。
+    assert _BACKEND != "remote", "_adb_reset 在 remote 模式绝不应被调用（会 kill 共享/远端 adb server）"
     try:
         subprocess.run([adb, "kill-server"], capture_output=True, timeout=15)
         print(f">>> adb kill-server（{adb}）清陈旧 offline 缓存")
@@ -618,14 +642,16 @@ def connect_all(roles, package=PACKAGE):
     多几秒加载。controller/resource 均由各自 tasker 保活，返回 ``{role: Tasker}``。
     """
     Toolkit.init_option(DEBUG_DIR)
-    found = {d.address: d for d in Toolkit.find_adb_devices()}
+    found = {d.address: d for d in _adb_find_devices()}
 
     # 清掉 adb server（5037）里的陈旧 offline 缓存：之前任何 adb 使用（手动探测 / GUI / 上一轮
     # 5r 未正常退）都可能给某些端口留下 offline 条目。find_adb_devices 能穿透缓存发现真设备，但
     # 下面 AdbController.post_connection 第一步 ``adb -s <addr> get-state`` 会直接读缓存——命中
     # offline 就秒级失败（"failed to connect" → "Tasker 未就绪"，本次 6130@16448 即此）。kill-server
     # 后下一条 adb 命令会自动重启一个干净 server、重新握手。run_5r 是独占 adb 的进程，无副作用。
-    if found:
+    # **仅 local 模式**：remote 模式下 adb server 是 Win 上共享的 5038（mumu_server 拥有），kill 会
+    # 断掉所有远端连接、且可能波及 MuMu 5037——绝不能 kill。
+    if found and _BACKEND != "remote":
         _adb = str(next(iter(found.values())).adb_path)
         try:
             subprocess.run([_adb, "kill-server"], capture_output=True, timeout=15)
@@ -633,11 +659,19 @@ def connect_all(roles, package=PACKAGE):
         except Exception as _e:
             print(f"!! adb kill-server 失败（忽略继续）：{_e}")
         time.sleep(0.5)
+    elif _BACKEND == "remote":
+        print(">>> remote 模式：跳过 kill-server（共享 Win:%d adb server，不能 kill）" % ADB_SERVER_PORT)
 
     taskers = {}
     for idx, (role, addr) in enumerate(roles.items(), 1):
         if addr not in found:
-            raise RuntimeError(f"{role} 的设备 {addr} 未找到；已发现 {list(found)}")
+            if _BACKEND == "remote":
+                # 远端 5038 server 可能还没把该角色端口 connect 进来——让 mumu_server 补 connect 后重查。
+                print(f"    [{role}] {addr} 不在远端设备列表，请求 mumu_server /adb/connect 后重查")
+                be_adb_connect(addr)
+                found = {d.address: d for d in _adb_find_devices()}
+            if addr not in found:
+                raise RuntimeError(f"{role} 的设备 {addr} 未找到；已发现 {list(found)}")
         dev = found[addr]
         ctrl = AdbController(
             adb_path=str(dev.adb_path), address=dev.address,
@@ -889,7 +923,7 @@ def launch(tasker, package=PACKAGE, timeout=240, address=None):
     ``address`` 由 ``launch_parallel`` 从 ``ROLES`` 注入（adb force-stop / 哨兵地址用）；为 None
     时（zhuagui 单账号旧路径）退化为只 start、不哨兵，沿用旧行为。
     """
-    adb = _adb_path()
+    adb = _adb_for_mode()   # local=MuMu adb.exe（Win）；remote=Mac adb（经 ADB_SERVER_SOCKET 打 Win 设备）
     _watch = (lambda: _game_process_alive(adb, address, package)) if address is not None else None
     run_task(tasker, "start", override={"启动游戏": {"package": package}},
              timeout=timeout, label="start 启动/登录", watch_alive=_watch)
@@ -915,7 +949,7 @@ def _reconnect_tasker(old_tasker, address):
     ~0.1GB/号的 OCR 模型内存 + 几秒加载。**不做 kill-server**（会扰动并发的其它账号）。
     """
     Toolkit.init_option(DEBUG_DIR)
-    found = {d.address: d for d in Toolkit.find_adb_devices()}
+    found = {d.address: d for d in (_adb_find_devices())}
     if address not in found:
         print(f"    [{address}] 重连失败：实例未在 adb 设备列表")
         return None
@@ -949,9 +983,9 @@ def _launch_account(tasker, role, address, package=PACKAGE, timeout=240):
     except Exception as e:
         print(f"!!! [{role}] launch 异常：{e}")
     print(f"!!! [{role}] launch 未就绪，升级 L3 实例级重启 + 重连 tasker")
-    adb = _adb_path()
+    adb = _adb_for_mode()   # remote 下 _restart_instance 走 HTTP（Win 端跑），adb 仅备用
     idx = (int(address.rsplit(":", 1)[1]) - 16384) // 32   # MuMu 约定 adb_port = 16384 + 32*idx
-    if not _restart_instance(adb, address, idx, package):
+    if not be_restart_instance(adb, address, idx, package):
         return False, None
     new_t = _reconnect_tasker(tasker, address)
     if new_t is None:
@@ -1212,9 +1246,153 @@ def print_help():
         print(f"  {k:18} {v}")
 
 
+# ============================================================================
+# 远端/本地 transport 抽象（plan §B/C）
+# main() 顶部 _detect_backend() 设 _BACKEND；be_* 包装层在"碰 MuMu 生命周期的入口"dispatch：
+#   remote → RemoteBackend（HTTP 到 Win mumu_server）；local → 现有 free 函数（逐字节不变）。
+# 关键简化：adb shell 探针（pidof/monkey/adb_ready/screencap）无需 HTTP——Mac 的 adb 经
+#   ADB_SERVER_SOCKET=tcp:<WIN_IP>:5038 透明打到 Win 设备。只有 MuMuManager.exe 生命周期
+#   （launch/shutdown/restart/ensure 实例）必须走 HTTP（Win 二进制，Mac 跑不了）。
+# ============================================================================
+_BACKEND = None   # "remote"/"local"/None（main 探测前）；None 视同 local
+
+
+def _mac_adb():
+    """Mac 远端模式用的 adb 二进制（MaaFw 经此 adb + ADB_SERVER_SOCKET 连 Win:ADB_SERVER_PORT）。
+    env MAA_5R_MAC_ADB 优先；否则默认 ~/platform-tools/adb（PoC 下载位置）。"""
+    p = os.environ.get("MAA_5R_MAC_ADB")
+    if p and os.path.isfile(p):
+        return p
+    return os.path.join(os.path.expanduser("~"), "platform-tools", "adb")
+
+
+def _adb_for_mode():
+    """当前模式用的 adb 二进制：local=MuMu 自带 adb.exe（Win）；remote=Mac 的 adb。"""
+    return _mac_adb() if _BACKEND == "remote" else _adb_path()
+
+
+def _adb_find_devices():
+    """按模式发现 adb 设备：remote 用 Mac adb（specified_adb）连远端 Win server；local 用默认。"""
+    if _BACKEND == "remote":
+        return list(Toolkit.find_adb_devices(specified_adb=_mac_adb()))
+    return list(Toolkit.find_adb_devices())
+
+
+def _ip_is_local(ip):
+    """ip 是否是本机某网卡地址（同机保护：Win 上 WIN_IP 命中 → 强制 local）。bind 成功即本机。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind((ip, 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+class RemoteBackend:
+    """HTTP 客户端：Mac 侧调用 Win mumu_server（http://WIN_IP:MUMU_API_PORT）做 MuMu 生命周期。
+    用 stdlib urllib（不引 requests，server/client 共享无依赖 helper）。"""
+    BASE = "http://%s:%d" % (WIN_IP, MUMU_API_PORT)
+
+    @staticmethod
+    def _req(method, path, body=None, timeout=REMOTE_PROBE_TIMEOUT):
+        url = RemoteBackend.BASE + path
+        data = json.dumps(body).encode("utf-8") if body is not None else None
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Content-Type", "application/json")
+        if SHARED_TOKEN:
+            req.add_header("Authorization", "Bearer " + SHARED_TOKEN)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            return json.loads(raw.decode("utf-8")) if raw else {}
+
+    @staticmethod
+    def get(path, timeout=REMOTE_PROBE_TIMEOUT):
+        return RemoteBackend._req("GET", path, timeout=timeout)
+
+    @staticmethod
+    def post(path, body, timeout=300):
+        return RemoteBackend._req("POST", path, body=body, timeout=timeout)
+
+
+def _detect_backend():
+    """探测远端 mumu_server：WIN_IP 是本机 → local（同机保护）；否则 GET /health，
+    ok && adb_up → remote，否则 local。"""
+    if _ip_is_local(WIN_IP):
+        return "local"
+    try:
+        h = RemoteBackend.get("/health", timeout=REMOTE_PROBE_TIMEOUT)
+        if h.get("ok") and h.get("adb_up"):
+            return "remote"
+        return "local"
+    except Exception:
+        return "local"
+
+
+# ---- be_* 包装层：main()/L3 调这些（不直接调 free 函数）。local 时透传，逐字节不变。----
+
+def be_role_indices(roles):
+    if _BACKEND == "remote":
+        # MuMu 约定 adb_port = 16384 + 32*idx（与 _role_indices 同公式）；remote 下直接算，
+        # 不依赖 mumu_info 字段结构（实例缺失由 ensure_instances 兜底报错）。
+        return {r: (int(addr.rsplit(":", 1)[1]) - 16384) // 32 for r, addr in roles.items()}
+    return _role_indices(roles)
+
+
+def be_ensure_instances(indices, package=PACKAGE):
+    if _BACKEND == "remote":
+        r = RemoteBackend.post("/instance/ensure", {"indices": list(indices), "package": package}, timeout=900)
+        if not r.get("ok"):
+            raise RuntimeError(f"远端 ensure_instances 失败：{r}")
+        return r
+    return ensure_instances(indices, package=package)
+
+
+def be_ensure_process(addresses, package=PACKAGE):
+    if _BACKEND == "remote":
+        r = RemoteBackend.post("/process/ensure", {"addresses": list(addresses), "package": package}, timeout=900)
+        if not r.get("ok"):
+            raise RuntimeError(f"远端 ensure_process 失败：{r}")
+        return r
+    return ensure_process(addresses, package=package)
+
+
+def be_shutdown_instances(indices):
+    if _BACKEND == "remote":
+        for idx in indices:
+            RemoteBackend.post("/instance/shutdown", {"idx": int(idx)}, timeout=120)
+        return
+    return shutdown_instances(indices)
+
+
+def be_restart_instance(adb, address, idx, package, boot_come_up=180):
+    if _BACKEND == "remote":
+        r = RemoteBackend.post("/instance/restart",
+                               {"idx": int(idx), "address": address, "package": package}, timeout=500)
+        return bool(r.get("ok"))
+    return _restart_instance(adb, address, idx, package, boot_come_up)
+
+
+def be_adb_connect(address):
+    """remote 下确保某地址在远端 5038 server 已 connect（connect_all 找不到该角色时兜底）。"""
+    if _BACKEND == "remote":
+        RemoteBackend.post("/adb/connect", {"address": address}, timeout=20)
+
+
 def main(mode="full", solo_tasks=None, solo_ids=None):
     open_log()  # 先开日志：后续所有 print 自动加 [时间戳] 前缀并 tee 到 DEBUG_DIR/run_5r/
     _assert_repo()
+    # 探测远端 mumu_server：healthy（且非本机）→ remote（Mac 期望路径，经 Win:5038 adb + Win:5080 生命周期
+    # API）；否则 local（Win 直达，沿用旧行为）。详见 plan §C。Mac 上 WIN_IP 非本机 → 探到即 remote；
+    # Win 上 WIN_IP 是本机 → 永远 local（同机保护，避免 Win 直达 5r 误走自己的 mumu_server）。
+    global _BACKEND
+    _BACKEND = _detect_backend()
+    if _BACKEND == "remote":
+        os.environ["ADB_SERVER_SOCKET"] = f"tcp:{WIN_IP}:{ADB_SERVER_PORT}"
+        print(f"=== 探测到 mumu_server（{WIN_IP}:{MUMU_API_PORT}），使用远端 MuMu + 远端 adb（{WIN_IP}:{ADB_SERVER_PORT}）===")
+    else:
+        print(f"=== mumu_server 不可达或为本机，使用本地 MuMu + 本地 adb ===")
     roles = ROLES
     package = PACKAGE
     fuben_entry = FUBEN_ENTRY
@@ -1223,14 +1401,14 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
 
     # 生命周期：确保 ROLES 里的实例都启动到 start_finished（幂等；未启动的用
     # ``control launch -pkg`` 拉起并自动开游戏）
-    role_idx = _role_indices(roles)
+    role_idx = be_role_indices(roles)
     print("=== 启动/检查 MuMu 实例 ===")
-    ensure_instances(sorted(role_idx.values()), package=package)
+    be_ensure_instances(sorted(role_idx.values()), package=package)
 
     # 在交给 Maa 的 start 之前，由 Python 侧显式确认游戏进程稳态存活（双重检查 + 重试）。
     # ensure_instances 的 -pkg 虽顺带拉游戏，但不保证进程稳定；这里 adb 兜底，缺一台即中止整轮。
     print("=== 确认游戏进程存活（双重检查 + 重试）===")
-    ensure_process(list(roles.values()), package=package)
+    be_ensure_process(list(roles.values()), package=package)
 
     print("=== 连接 5 设备（共享 Resource）===")
     taskers = connect_all(roles, package=package)
@@ -1282,19 +1460,512 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
             taskers.clear()
             gc.collect()
             print("=== 收尾：关闭 MuMu 实例 ===")
-            shutdown_instances(to_stop)
+            be_shutdown_instances(to_stop)
 
     print("=== 全部完成 ===")
+
+
+# ============================================================================
+# HTTP 服务模式 + remote 客户端（plan §E/F/G）。stdlib http.server，零新依赖。
+# 仿 maa_cli.py 的 _send_json/_send_error/_read_body_json helper 风格。
+# ============================================================================
+
+# ---- 通用 JSON helper（两个 server 共用）----
+def _send_json(h, obj, code=200):
+    body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    h.send_response(code)
+    h.send_header("Content-Type", "application/json; charset=utf-8")
+    h.send_header("Content-Length", str(len(body)))
+    h.end_headers()
+    h.wfile.write(body)
+
+
+def _send_err(h, code, msg):
+    _send_json(h, {"error": msg}, code)
+
+
+def _read_body_json(h):
+    try:
+        n = int(h.headers.get("Content-Length", 0))
+        raw = h.rfile.read(n) if n else b""
+        return json.loads(raw.decode("utf-8")) if raw.strip() else {}
+    except Exception:
+        return {}
+
+
+def _auth_ok(h):
+    if not SHARED_TOKEN:
+        return True
+    if h.headers.get("Authorization", "") == "Bearer " + SHARED_TOKEN:
+        return True
+    _send_err(h, 401, "unauthorized")
+    return False
+
+
+def _log_message_silent(h, *a):
+    """静默 BaseHTTPRequestHandler 的默认访问日志（自己 print 关键步骤即可）。"""
+    pass
+
+
+# ============================================================================
+# mumu_server（Win）：专用 0.0.0.0 adb server + MuMu 生命周期 HTTP API。不加载 Maa 资源。
+# ============================================================================
+_INSTANCE_LOCKS = {}   # idx -> threading.Lock（变更单实例的端点持锁，防并发双启）
+
+
+def _inst_lock(idx):
+    return _INSTANCE_LOCKS.setdefault(int(idx), threading.Lock())
+
+
+def _dedicated_adb():
+    """专用 0.0.0.0 adb server 用的 adb 二进制。**必须是 ≥37 的 platform-tools adb**——MuMu 自带的
+    36.0.0 不认 ``-a``、只能绑 127.0.0.1，Mac 经 Tailscale 够不到。env MAA_5R_DEDICATED_ADB 优先；
+    再查常见位置（PoC 下载点 / ~/platform-tools）；都找不到回退 MuMu 自带（仅本机可用，远端会失败）。"""
+    for cand in (os.environ.get("MAA_5R_DEDICATED_ADB"),
+                 r"C:\dev\platform-tools\adb.exe",
+                 os.path.join(os.path.expanduser("~"), "platform-tools", "adb.exe")):
+        if cand and os.path.isfile(cand):
+            return cand
+    return _adb_path()   # MuMu 自带（回退；远端不可用，run_mumu_server 会告警）
+
+
+def _dedicated_bind_ok():
+    """专用 adb server 是否绑了 0.0.0.0:ADB_SERVER_PORT（而非仅 127.0.0.1）。Win 用 netstat 探测。"""
+    try:
+        out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=8).stdout
+        return any(f"0.0.0.0:{ADB_SERVER_PORT}" in ln and "LISTENING" in ln for ln in out.splitlines())
+    except Exception:
+        return True   # 探测失败不阻断（非 Win 等）
+
+
+def _dedicated_adb_up():
+    """专用 5038 adb server 是否在跑（adb -P 5038 devices 能回设备列表）。"""
+    try:
+        out = subprocess.run([_dedicated_adb(), "-P", str(ADB_SERVER_PORT), "devices"],
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=8).stdout
+        return "List of devices" in out
+    except Exception:
+        return False
+
+
+def _connect_roles_into_dedicated():
+    """把所有 ROLES 端口 connect 进专用 5038 server，让 Mac find_adb_devices 能见到 127.0.0.1:16xxx。"""
+    for addr in ROLES.values():
+        try:
+            subprocess.run([_dedicated_adb(), "-P", str(ADB_SERVER_PORT), "connect", addr],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+        except Exception:
+            pass
+
+
+def _start_dedicated_adb():
+    """启动专用 0.0.0.0:ADB_SERVER_PORT adb server（幂等）。
+    已起且绑了 0.0.0.0 → 复用；已起但只绑 127.0.0.1（旧 adb / 残留）→ kill 后用现代 adb 重绑。"""
+    if _dedicated_adb_up():
+        if _dedicated_bind_ok():
+            _connect_roles_into_dedicated()
+            return True
+        print(">>> 专用 5038 仅绑 127.0.0.1（旧 MuMu adb 起的残留），kill 后用现代 adb 重绑 0.0.0.0")
+        _stop_dedicated_adb()
+        time.sleep(0.8)
+    try:
+        # -a 绑 0.0.0.0（需 ≥37 的 platform-tools adb；MuMu 36.0.0 不认）；start-server 自守护。
+        subprocess.run([_dedicated_adb(), "-a", "-P", str(ADB_SERVER_PORT), "start-server"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
+    except Exception as e:
+        print(f"!! 启动专用 adb server 异常：{e}")
+    time.sleep(1.0)
+    _connect_roles_into_dedicated()
+    return _dedicated_adb_up()
+
+
+def _stop_dedicated_adb():
+    """只 kill 专用 5038 server（绝不碰 MuMu 自管的 5037）。"""
+    try:
+        subprocess.run([_dedicated_adb(), "-P", str(ADB_SERVER_PORT), "kill-server"],
+                       capture_output=True, timeout=15)
+    except Exception:
+        pass
+
+
+class _MuMuHandler(BaseHTTPRequestHandler):
+    log_message = _log_message_silent
+
+    def do_GET(self):
+        if not _auth_ok(self):
+            return
+        parts = urllib.parse.urlparse(self.path)
+        path, query = parts.path, urllib.parse.parse_qs(parts.query)
+        try:
+            if path == "/health":
+                adb_up = _dedicated_adb_up() or _start_dedicated_adb()   # 自愈
+                mumu_ok = True
+                try:
+                    mumu_info("0")
+                except Exception:
+                    mumu_ok = False
+                _send_json(self, {"ok": True, "adb_port": ADB_SERVER_PORT, "adb_up": adb_up, "mumu": mumu_ok})
+            elif path == "/mumu/info":
+                indices = query.get("indices", ["all"])[0]
+                _send_json(self, mumu_info(indices))
+            elif path == "/process/alive":
+                addr = query.get("address", [None])[0]
+                if not addr:
+                    _send_err(self, 400, "missing address"); return
+                _send_json(self, {"alive": _game_process_alive(_adb_path(), addr)})
+            elif path in ("", "/", "/help"):
+                _send_json(self, {"endpoints": [
+                    "GET /health", "GET /mumu/info?indices=all", "GET /process/alive?address=",
+                    "POST /instance/{launch,shutdown,restart,ensure}", "POST /process/ensure",
+                    "POST /adb/connect", "POST /adb/server"]})
+            else:
+                _send_err(self, 404, f"unknown path {path}")
+        except Exception as e:
+            _send_err(self, 500, f"{type(e).__name__}: {e}")
+
+    def do_POST(self):
+        if not _auth_ok(self):
+            return
+        path = urllib.parse.urlparse(self.path).path
+        body = _read_body_json(self)
+        try:
+            if path == "/instance/launch":
+                idx, pkg = int(body["idx"]), body.get("package", PACKAGE)
+                with _inst_lock(idx):
+                    _launch_one(idx, pkg)
+                _send_json(self, {"ok": True})
+            elif path == "/instance/shutdown":
+                idx = int(body["idx"])
+                with _inst_lock(idx):
+                    _shutdown_one(idx)
+                _send_json(self, {"ok": True})
+            elif path == "/instance/restart":
+                idx, addr = int(body["idx"]), body["address"]
+                pkg = body.get("package", PACKAGE)
+                with _inst_lock(idx):
+                    ok = _restart_instance(_adb_path(), addr, idx, pkg)
+                _send_json(self, {"ok": ok})
+            elif path == "/instance/ensure":
+                indices = sorted(set(int(i) for i in body["indices"]))
+                ensure_instances(indices, package=body.get("package", PACKAGE))
+                _send_json(self, {"ok": True, "ready": indices})
+            elif path == "/process/ensure":
+                ensure_process(list(body["addresses"]), package=body.get("package", PACKAGE))
+                _send_json(self, {"ok": True})
+            elif path == "/adb/connect":
+                # 用专用 server 端口 connect（不走默认 5037）：把 address 注册进 5038 的设备表。
+                subprocess.run([_dedicated_adb(), "-P", str(ADB_SERVER_PORT), "connect", body["address"]],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15)
+                _send_json(self, {"ok": True})
+            elif path == "/adb/server":
+                action = body.get("action")
+                if action == "stop":
+                    _stop_dedicated_adb(); _send_json(self, {"ok": True, "port": ADB_SERVER_PORT})
+                else:
+                    ok = _start_dedicated_adb(); _send_json(self, {"ok": ok, "port": ADB_SERVER_PORT})
+            else:
+                _send_err(self, 404, f"unknown path {path}")
+        except Exception as e:
+            _send_err(self, 500, f"{type(e).__name__}: {e}")
+
+
+def run_mumu_server(argv=None):
+    """mumu_server 模式：起专用 adb server + HTTP API（不加载 Maa 资源）。"""
+    print(f"=== mumu_server：专用 adb server 0.0.0.0:{ADB_SERVER_PORT} + HTTP API 0.0.0.0:{MUMU_API_PORT} ===")
+    if not _start_dedicated_adb():
+        print("!! 专用 adb server 启动失败（继续；/health 会自愈）")
+    elif not _dedicated_bind_ok():
+        print(f"!! 警告：专用 adb server 未绑 0.0.0.0:{ADB_SERVER_PORT}（Mac 经 Tailscale 够不到）——")
+        print(f"!!   _dedicated_adb 用了 MuMu 自带旧 adb（36.0.0，-a 失效，只绑 127.0.0.1）。")
+        print(f"!!   设 MAA_5R_DEDICATED_ADB=<≥37 的 platform-tools/adb.exe> 后重启 mumu_server。")
+    else:
+        print(f"<<< 专用 adb server 就绪 0.0.0.0:{ADB_SERVER_PORT}（不碰 MuMu 5037）")
+    httpd = ThreadingHTTPServer(("0.0.0.0", MUMU_API_PORT), _MuMuHandler)
+    print(f"<<< mumu_server 就绪：HTTP 0.0.0.0:{MUMU_API_PORT}（Mac 经此 + adb:5038 远控；Ctrl+C 退出）")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("=== 收到 Ctrl+C，关闭 mumu_server ===")
+    finally:
+        try:
+            httpd.shutdown()
+        except Exception:
+            pass
+        print("=== 关闭专用 adb server（仅 5038，不碰 MuMu 5037）===")
+        _stop_dedicated_adb()
+    return 0
+
+
+# ============================================================================
+# cli_server（Mac）：HTTP API 接收 CLI 指令；每个 /run 起独立子进程跑 main()，
+# cancel = 杀子进程 = OS 回收一切（MaaFw/线程/adb 连接），等价"像退出进程一样清理干净"。
+# ============================================================================
+_JOBS = {}                # job_id -> {state, exit, lines, lock, started, ended, mode, proc, cancel_requested}
+_JOBS_LOCK = threading.Lock()
+_CURRENT_JOB_ID = None    # 单飞：一次只一个 running job（五开设备共享资源）
+
+
+def _new_job(mode):
+    return {"state": "running", "exit": None, "lines": [], "lock": threading.Lock(),
+            "started": time.time(), "ended": None, "mode": mode, "proc": None, "cancel_requested": False}
+
+
+def _spawn_job(job_id, mode, solo_tasks, solo_ids):
+    """子进程跑 ``python run_5r.py <mode> [args]``；stdout 逐行读进 job['lines']。"""
+    cmd = [sys.executable, os.path.abspath(__file__), mode]
+    if mode == "solo":
+        if solo_ids:
+            cmd += ["--ids", ",".join(str(i) for i in sorted(solo_ids))]
+        if solo_tasks:
+            cmd += list(solo_tasks)
+    print(f"    [{job_id}] spawn: {' '.join(cmd)}  (cwd={REPO_DIR})")
+    proc = subprocess.Popen(cmd, cwd=REPO_DIR,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            bufsize=1, text=True, encoding="utf-8", errors="replace")
+    with _JOBS_LOCK:
+        _JOBS[job_id]["proc"] = proc
+
+    def _reader():
+        for line in proc.stdout:
+            with _JOBS_LOCK:
+                job = _JOBS.get(job_id)
+                if job is None:
+                    break
+                job["lines"].append({"i": len(job["lines"]), "t": line.rstrip("\n")})
+        rc = proc.wait()
+        with _JOBS_LOCK:
+            job = _JOBS.get(job_id)
+            if job is not None:
+                job["exit"] = rc
+                job["ended"] = time.time()
+                if job["state"] == "running":   # 未被 cancel 预置
+                    job["state"] = "done" if rc == 0 else "failed"
+                global _CURRENT_JOB_ID
+                if _CURRENT_JOB_ID == job_id:
+                    _CURRENT_JOB_ID = None
+            print(f"    [{job_id}] 子进程退出 rc={rc} → state={job['state'] if job else '?'}")
+
+    threading.Thread(target=_reader, daemon=True).start()
+
+
+def _cancel_job(job_id):
+    """terminate→grace 5s→kill。OS 回收子进程的 MaaFw/线程/adb 连接。幂等。"""
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        if not job:
+            return "not_found"
+        if job["state"] != "running":
+            return job["state"]
+        job["cancel_requested"] = True
+        proc = job["proc"]
+    if proc is None:
+        return "cancelled"
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+    with _JOBS_LOCK:
+        job["state"] = "cancelled"
+        job["ended"] = time.time()
+        if job["exit"] is None:
+            job["exit"] = proc.returncode if proc.returncode is not None else -15
+        global _CURRENT_JOB_ID
+        if _CURRENT_JOB_ID == job_id:
+            _CURRENT_JOB_ID = None
+    return "cancelled"
+
+
+class _CliHandler(BaseHTTPRequestHandler):
+    log_message = _log_message_silent
+
+    def do_GET(self):
+        if not _auth_ok(self):
+            return
+        parts = urllib.parse.urlparse(self.path)
+        path, query = parts.path, urllib.parse.parse_qs(parts.query)
+        try:
+            if path == "/health":
+                with _JOBS_LOCK:
+                    busy = _CURRENT_JOB_ID is not None
+                _send_json(self, {"ok": True, "busy": busy, "current_job": _CURRENT_JOB_ID})
+            elif path == "/jobs":
+                with _JOBS_LOCK:
+                    lst = [{"job_id": jid, "state": j["state"], "mode": j["mode"],
+                            "started": j["started"], "ended": j["ended"], "exit": j["exit"]}
+                           for jid, j in _JOBS.items()]
+                _send_json(self, {"jobs": lst})
+            elif path.startswith("/jobs/") and path.endswith("/status"):
+                jid = path[len("/jobs/"):-len("/status")]
+                with _JOBS_LOCK:
+                    j = _JOBS.get(jid)
+                    if not j:
+                        _send_err(self, 404, "job not found"); return
+                    _send_json(self, {"job_id": jid, "state": j["state"], "exit": j["exit"],
+                                      "started": j["started"], "ended": j["ended"], "mode": j["mode"]})
+            elif path.startswith("/jobs/") and path.endswith("/logs"):
+                jid = path[len("/jobs/"):-len("/logs")]
+                since = int(query.get("since", ["0"])[0])
+                with _JOBS_LOCK:
+                    j = _JOBS.get(jid)
+                    if not j:
+                        _send_err(self, 404, "job not found"); return
+                    lines = [ln for ln in j["lines"] if ln["i"] >= since]
+                body = "\n".join(json.dumps(ln, ensure_ascii=False) for ln in lines)
+                data = body.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            elif path in ("", "/", "/help"):
+                _send_json(self, {"endpoints": [
+                    "POST /run {mode,solo_tasks?,solo_ids?}", "GET /jobs/<id>/status",
+                    "GET /jobs/<id>/logs?since=N", "POST /jobs/<id>/cancel", "GET /jobs", "GET /health"]})
+            else:
+                _send_err(self, 404, f"unknown path {path}")
+        except Exception as e:
+            _send_err(self, 500, f"{type(e).__name__}: {e}")
+
+    def do_POST(self):
+        if not _auth_ok(self):
+            return
+        path = urllib.parse.urlparse(self.path).path
+        body = _read_body_json(self)
+        try:
+            if path == "/run":
+                global _CURRENT_JOB_ID
+                with _JOBS_LOCK:
+                    if _CURRENT_JOB_ID is not None:
+                        _send_err(self, 409, f"busy: job {_CURRENT_JOB_ID} running；先 POST /jobs/{_CURRENT_JOB_ID}/cancel")
+                        return
+                mode = body.get("mode", "full")
+                if mode not in ("full", "launch", "team", "form", "run", "fuben", "zhuagui", "solo"):
+                    _send_err(self, 400, f"bad mode {mode}"); return
+                job_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+                with _JOBS_LOCK:
+                    _JOBS[job_id] = _new_job(mode)
+                    _CURRENT_JOB_ID = job_id
+                print(f">>> 接收任务 job_id={job_id} mode={mode}")
+                _spawn_job(job_id, mode, body.get("solo_tasks"), body.get("solo_ids"))
+                _send_json(self, {"job_id": job_id, "status_url": f"/jobs/{job_id}/status",
+                                  "logs_url": f"/jobs/{job_id}/logs"}, code=202)
+            elif path.startswith("/jobs/") and path.endswith("/cancel"):
+                jid = path[len("/jobs/"):-len("/cancel")]
+                state = _cancel_job(jid)
+                if state == "not_found":
+                    _send_err(self, 404, "job not found"); return
+                _send_json(self, {"ok": True, "state": state})
+            else:
+                _send_err(self, 404, f"unknown path {path}")
+        except Exception as e:
+            _send_err(self, 500, f"{type(e).__name__}: {e}")
+
+
+def run_cli_server(argv=None):
+    """cli_server 模式：HTTP API 接收 CLI 指令，子进程跑 main()（Maa 资源在此加载）。"""
+    httpd = ThreadingHTTPServer(("0.0.0.0", CLI_API_PORT), _CliHandler)
+    print(f"<<< cli_server 就绪：HTTP 0.0.0.0:{CLI_API_PORT}（POST /run 起子进程；Ctrl+C 退出）")
+    print(f"    Win 侧用 `python run_5r.py remote full` 提交；GET /jobs/<id>/logs 轮询日志")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("=== 收到 Ctrl+C，关闭 cli_server ===")
+    finally:
+        # server 退出时终止任何 running 子进程，不留孤儿（像退出进程一样清理干净）
+        with _JOBS_LOCK:
+            running = [jid for jid, j in _JOBS.items() if j["state"] == "running"]
+        for jid in running:
+            print(f"=== 退出清理：cancel running job {jid} ===")
+            _cancel_job(jid)
+        try:
+            httpd.shutdown()
+        except Exception:
+            pass
+    return 0
+
+
+# ============================================================================
+# remote 客户端（Win→Mac）：POST /run + 轮询 logs/status，复用 _parse_ids_flag。
+# ============================================================================
+def _remote_client(argv):
+    import requests   # 客户端侧（已在 requirements）；懒加载，server 端不依赖
+    base = os.environ.get("MAA_5R_CLI_URL", f"http://{MAC_IP}:{CLI_API_PORT}")
+    headers = {"Authorization": "Bearer " + SHARED_TOKEN} if SHARED_TOKEN else {}
+    args = list(argv or [])
+    mode = args[0] if args else "full"
+    body = {"mode": mode}
+    if mode == "solo":
+        ids, tasks = _parse_ids_flag(args[1:])
+        if ids:
+            body["solo_ids"] = sorted(ids)
+        if tasks:
+            body["solo_tasks"] = tasks
+    print(f">>> 远程提交 {body} → {base}/run")
+    try:
+        r = requests.post(base + "/run", json=body, headers=headers, timeout=30)
+    except Exception as e:
+        print(f"!! 连不上 cli_server（{base}）：{e}"); return 1
+    if r.status_code == 409:
+        print(f"!! cli_server 忙：{r.text}"); return 1
+    if r.status_code != 202:
+        print(f"!! /run 失败 {r.status_code}：{r.text}"); return 1
+    job_id = r.json()["job_id"]
+    print(f"<<< 已提交 job_id={job_id}；轮询日志（Ctrl+C 退出，不取消任务）...")
+    since = 0
+    while True:
+        try:
+            lr = requests.get(f"{base}/jobs/{job_id}/logs",
+                              params={"since": since}, headers=headers, timeout=10)
+            for line in lr.text.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                    print(obj.get("t", ""))
+                    since = max(since, int(obj.get("i", since)) + 1)
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"!! 拉日志失败（继续）：{e}")
+        try:
+            s = requests.get(f"{base}/jobs/{job_id}/status", headers=headers, timeout=10).json()
+        except Exception as e:
+            print(f"!! 查状态失败（继续）：{e}"); time.sleep(2); continue
+        st = s.get("state")
+        if st in ("done", "failed", "cancelled", "not_found"):
+            print(f"=== job 终态：{st} exit={s.get('exit')} ===")
+            return 0 if st == "done" else 1
+        time.sleep(2)
 
 
 if __name__ == "__main__":
     _args = sys.argv[1:]
     _mode = _args[0] if _args else "full"
+    # 服务/客户端模式：在 TerminateProcess try 之前分流，各自独立退出（不经那套 finally）
+    if _mode in ("-h", "--help", "help"):
+        print_help(); sys.exit(0)
+    if _mode == "mumu_server":
+        sys.exit(run_mumu_server(_args[1:]))
+    if _mode == "cli_server":
+        sys.exit(run_cli_server(_args[1:]))
+    if _mode == "remote":
+        sys.exit(_remote_client(_args[1:]))
     _exit_code = 0
     try:
-        if _mode in ("-h", "--help", "help"):
-            print_help()
-        elif _mode in ("full", "launch", "team", "form", "run", "fuben", "zhuagui"):
+        if _mode in ("full", "launch", "team", "form", "run", "fuben", "zhuagui"):
             main(_mode)
         elif _mode == "solo":
             _ids, _tasks = _parse_ids_flag(_args[1:])
@@ -1323,12 +1994,16 @@ if __name__ == "__main__":
                 _LOG_FILE.flush()
             except Exception:
                 pass
-        print("=== main 结束，TerminateProcess 强杀进程（跳过 DLL detach）===")
-        try:
-            import ctypes
-            _k32 = ctypes.windll.kernel32
-            _k32.GetCurrentProcess.restype = ctypes.c_void_p
-            _k32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
-            _k32.TerminateProcess(_k32.GetCurrentProcess(), _exit_code)
-        except Exception:
-            os._exit(_exit_code)   # ctypes 失败兜底（理论上到不了这里）
+        if _IS_WINDOWS:
+            print("=== main 结束，TerminateProcess 强杀进程（跳过 DLL detach）===")
+            try:
+                import ctypes
+                _k32 = ctypes.windll.kernel32
+                _k32.GetCurrentProcess.restype = ctypes.c_void_p
+                _k32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+                _k32.TerminateProcess(_k32.GetCurrentProcess(), _exit_code)
+            except Exception:
+                os._exit(_exit_code)   # ctypes 失败兜底（理论上到不了这里）
+        else:
+            # Mac/非 Win：无 DLL detach 卡死问题，正常退出（cli_server 子进程靠此干净收尾）。
+            sys.exit(_exit_code)
