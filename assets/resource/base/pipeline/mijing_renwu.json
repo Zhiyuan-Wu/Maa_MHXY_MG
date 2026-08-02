@@ -297,7 +297,9 @@
             101,
             109
         ],
+        "pre_delay": 500,
         "action": "Click",
+        "post_delay": 500,
         "next": [
             "秘境-实际点击进入战斗2"
         ]
@@ -313,7 +315,9 @@
             285,
             63
         ],
-        "action": "Click"
+        "pre_delay": 500,
+        "action": "Click",
+        "post_delay": 500
     },
     "mijing_tongguan": {
         "focus": {

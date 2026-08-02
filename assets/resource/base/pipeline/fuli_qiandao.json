@@ -57,8 +57,48 @@
         "action": "Click",
         "post_delay": 1000,
         "next": [
+            "[JumpBack]刮刮乐识别是否有高价值物品",
             "qiandaohuadong"
         ]
+    },
+    "刮刮乐识别是否有高价值物品": {
+        "max_hit": 1,
+        "inverse": true,
+        "recognition": "TemplateMatch",
+        "template": [
+            "qiandao/FL_qinglongshi.png",
+            "qiandao/FL_baihushi.png",
+            "qiandao/FL_zhuqueshi.png",
+            "qiandao/FL_xuanwushi.png",
+            "qiandao/FL_jinliulu.png",
+            "qiandao/FL_gaoshoujue.png",
+            "qiandao/FL_qianyeliulu.png",
+            "qiandao/FL_chaojihuanshedan.png",
+            "qiandao/FL_shenshoulingshi.png"
+        ],
+        "roi": [
+            572,
+            173,
+            538,
+            106
+        ],
+        "next": [
+            "刮刮乐未识别到高价值物品-点击刷新"
+        ]
+    },
+    "刮刮乐未识别到高价值物品-点击刷新": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "qiandao/shuaxin.png"
+        ],
+        "roi": [
+            568,
+            89,
+            435,
+            84
+        ],
+        "pre_delay": 300,
+        "action": "Click"
     },
     "qiandaohuadong": {
         "max_hit": 2,
