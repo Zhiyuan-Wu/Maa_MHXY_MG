@@ -106,6 +106,7 @@
     "传送长安城_69副本": {
         "recognition": "TemplateMatch",
         "template": [
+            "zonghe/tab_changancheng4.png",
             "zonghe/tab_changancheng.png",
             "zonghe/tab_changancheng2.png",
             "zonghe/tab_changancheng3.png"
