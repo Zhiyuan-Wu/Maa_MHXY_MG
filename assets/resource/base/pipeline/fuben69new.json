@@ -1,0 +1,406 @@
+{
+    "fuben69new": {
+        "next": [
+            "fuben69new-识别位置-长安城-过渡",
+            "[JumpBack]panduan_zhujiemian"
+        ]
+    },
+    "fuben69new-识别位置-长安城-过渡": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/chenghao.png",
+            "zonghe/jiahao.png"
+        ],
+        "roi": [
+            1206,
+            637,
+            66,
+            57
+        ],
+        "post_delay": 3000,
+        "next": [
+            "fuben69new-识别位置-长安城",
+            "[JumpBack]panduan_zhujiemian_ks",
+            "[JumpBack]fuben69new-打开大地图"
+        ]
+    },
+    "fuben69new-打开大地图": {
+        "pre_delay": 500,
+        "action": "ClickKey",
+        "key": [
+            57,
+            41
+        ],
+        "post_delay": 1000,
+        "next": [
+            "fuben69new-打开大地图成功-传送长安城",
+            "[JumpBack]panduan_zhujiemian_ks",
+            "[JumpBack]大地图界面-按键打开失败_点击图标"
+        ]
+    },
+    "fuben69new-打开大地图成功-传送长安城": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/ditu_jiemian_panduan.png",
+            "zonghe/ditu_jiemian_panduan2.png"
+        ],
+        "roi": [
+            111,
+            32,
+            83,
+            79
+        ],
+        "next": [
+            "fuben69new-传送长安城"
+        ]
+    },
+    "fuben69new-传送长安城": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/tab_changancheng4.png",
+            "zonghe/tab_changancheng.png",
+            "zonghe/tab_changancheng2.png",
+            "zonghe/tab_changancheng3.png"
+        ],
+        "pre_delay": 1000,
+        "action": "Click",
+        "post_delay": 1000,
+        "next": [
+            "[JumpBack]fuben69new-识别位置-长安城-过渡"
+        ]
+    },
+    "fuben69new-识别位置-长安城": {
+        "recognition": "OCR",
+        "expected": [
+            "长安城"
+        ],
+        "roi": [
+            108,
+            22,
+            117,
+            31
+        ],
+        "post_delay": 3000,
+        "next": [
+            "fuben69new-打开小地图-百晓仙子"
+        ]
+    },
+    "fuben69new-打开小地图-百晓仙子": {
+        "pre_delay": 1000,
+        "action": "ClickKey",
+        "key": [
+            61
+        ],
+        "post_delay": 1000,
+        "next": [
+            "fuben69new-点击地图-百晓仙子",
+            "[JumpBack]小地图-按键打开失败-点击小地图图标"
+        ]
+    },
+    "fuben69new-点击地图-百晓仙子": {
+        "recognition": "Or",
+        "any_of": [
+            {
+                "recognition": "OCR",
+                "expected": [
+                    "百晓",
+                    "仙子",
+                    "晓仙",
+                    "晓",
+                    "百晓仙子"
+                ],
+                "roi": [
+                    396,
+                    354,
+                    153,
+                    46
+                ]
+            },
+            {
+                "recognition": "TemplateMatch",
+                "template": [
+                    "fuben/baixiao.png",
+                    "fuben/baixiao2.png",
+                    "fuben/baixiao3.png"
+                ],
+                "roi": [
+                    421,
+                    357,
+                    106,
+                    38
+                ]
+            }
+        ],
+        "action": "Click",
+        "target_offset": [
+            0,
+            0,
+            -4,
+            -8
+        ],
+        "post_delay": 1000,
+        "next": [
+            "[JumpBack]再次点击地图百晓仙子",
+            "fuben69new-百晓仙子-选择副本"
+        ]
+    },
+    "fuben69new-百晓仙子-选择副本": {
+        "recognition": "OCR",
+        "expected": [
+            "选择副本"
+        ],
+        "roi": [
+            923,
+            156,
+            324,
+            356
+        ],
+        "action": "Click",
+        "post_delay": 200,
+        "next": [
+            "fuben69new-路由-类型"
+        ]
+    },
+    "fuben69new-路由-类型": {
+        "next": [
+            "fuben69new-路由-序号-普通"
+        ]
+    },
+    "fuben69new-选择侠士副本-tab": {
+        "recognition": "OCR",
+        "expected": [
+            "侠士副本"
+        ],
+        "roi": [
+            399,
+            104,
+            158,
+            42
+        ],
+        "action": "Click",
+        "post_delay": 500,
+        "next": [
+            "fuben69new-路由-序号-侠士"
+        ]
+    },
+    "fuben69new-路由-序号-侠士": {
+        "next": [
+            "fuben69new-进入-侠士-1"
+        ]
+    },
+    "fuben69new-路由-序号-普通": {
+        "next": [
+            "fuben69new-进入-普通-1"
+        ]
+    },
+    "fuben69new-进入-侠士-1": {
+        "focus": {
+            "Node.Action.Succeeded": "fuben69new 进入侠士-1"
+        },
+        "recognition": "OCR",
+        "expected": [
+            "进入"
+        ],
+        "roi": [
+            316,
+            570,
+            150,
+            52
+        ],
+        "action": "Click",
+        "post_delay": 1000,
+        "next": [
+            "fuben69new-进入-侠士-成功",
+            "[JumpBack]115进入侠士副本-等待队员同意",
+            "[JumpBack]fuben69new-进入-侠士-1-失败重试"
+        ]
+    },
+    "fuben69new-进入-侠士-2": {
+        "focus": {
+            "Node.Action.Succeeded": "fuben69new 进入侠士-2"
+        },
+        "recognition": "OCR",
+        "expected": [
+            "进入"
+        ],
+        "roi": [
+            602,
+            570,
+            148,
+            51
+        ],
+        "action": "Click",
+        "post_delay": 1000,
+        "next": [
+            "fuben69new-进入-侠士-成功",
+            "[JumpBack]115进入侠士副本-等待队员同意",
+            "[JumpBack]fuben69new-进入-侠士-2-失败重试"
+        ]
+    },
+    "fuben69new-进入-侠士-2-失败重试": {
+        "max_hit": 2,
+        "recognition": "OCR",
+        "expected": [
+            "进入"
+        ],
+        "roi": [
+            602,
+            570,
+            148,
+            51
+        ],
+        "pre_delay": 1000,
+        "action": "Click",
+        "post_delay": 1000
+    },
+    "fuben69new-进入-侠士-成功": {
+        "focus": {
+            "Node.Recognition.Succeeded": "fuben69new 进入侠士副本成功"
+        },
+        "recognition": "OCR",
+        "expected": [
+            "因缘绘"
+        ],
+        "roi": [
+            502,
+            53,
+            94,
+            42
+        ],
+        "pre_delay": 1000,
+        "next": [
+            "fuben69new-副本内状态机"
+        ]
+    },
+    "fuben69new-进入-侠士-1-失败重试": {
+        "max_hit": 2,
+        "recognition": "OCR",
+        "expected": [
+            "进入"
+        ],
+        "roi": [
+            316,
+            570,
+            150,
+            52
+        ],
+        "pre_delay": 1000,
+        "action": "Click",
+        "post_delay": 1000
+    },
+    "fuben69new-进入-普通-1": {
+        "focus": {
+            "Node.Action.Succeeded": "fuben69new 进入普通-1"
+        },
+        "recognition": "OCR",
+        "expected": [
+            "进入"
+        ],
+        "roi": [
+            319,
+            571,
+            145,
+            49
+        ],
+        "action": "Click",
+        "post_delay": 800,
+        "next": [
+            "fuben69new-副本内状态机"
+        ]
+    },
+    "fuben69new-进入-普通-2": {
+        "focus": {
+            "Node.Action.Succeeded": "fuben69new 进入普通-2"
+        },
+        "recognition": "OCR",
+        "expected": [
+            "进入"
+        ],
+        "roi": [
+            603,
+            570,
+            147,
+            51
+        ],
+        "action": "Click",
+        "post_delay": 800,
+        "next": [
+            "fuben69new-副本内状态机"
+        ]
+    },
+    "fuben69new-进入-普通-3": {
+        "focus": {
+            "Node.Action.Succeeded": "fuben69new 进入普通-3"
+        },
+        "recognition": "OCR",
+        "expected": [
+            "进入"
+        ],
+        "roi": [
+            889,
+            569,
+            146,
+            51
+        ],
+        "action": "Click",
+        "post_delay": 800,
+        "next": [
+            "fuben69new-副本内状态机"
+        ]
+    },
+    "fuben69new-副本内状态机": {
+        "next": [
+            "fuben69new-副本完成-退出",
+            "[JumpBack]点击副本-跳过剧情动画",
+            "[JumpBack]战斗中-等待10秒",
+            "[JumpBack]点击副本-开始战斗",
+            "[JumpBack]副本-战斗-对话",
+            "[JumpBack]跳过剧情动画-快进键",
+            "[JumpBack]推荐好友信息",
+            "[JumpBack]关闭福利弹窗",
+            "[JumpBack]关闭师门弹窗",
+            "[JumpBack]fuben69new-间隔2秒-节流"
+        ]
+    },
+    "fuben69new-间隔2秒-节流": {
+        "max_hit": 300,
+        "pre_delay": 2000
+    },
+    "fuben69new-副本完成-退出": {
+        "focus": {
+            "Node.Recognition.Succeeded": "fuben69new 副本已完成"
+        },
+        "recognition": "OCR",
+        "expected": [
+            "副本已完成"
+        ],
+        "roi": [
+            1032,
+            208,
+            149,
+            56
+        ],
+        "pre_delay": 1500,
+        "action": "Click",
+        "post_delay": 1500,
+        "next": [
+            "panduan_zhujiemian",
+            "[JumpBack]fuben69new-打开大地图"
+        ]
+    },
+    "fuben69new-测试-普通-1": {
+        "next": [
+            "fuben69new-副本完成-退出",
+            "[JumpBack]点击副本-跳过剧情动画",
+            "[JumpBack]战斗中-等待10秒",
+            "[JumpBack]点击副本-开始战斗",
+            "[JumpBack]副本-战斗-对话",
+            "[JumpBack]跳过剧情动画-快进键",
+            "[JumpBack]推荐好友信息",
+            "[JumpBack]关闭福利弹窗",
+            "[JumpBack]关闭师门弹窗",
+            "[JumpBack]fuben69new-间隔2秒-节流",
+            "panduan_zhujiemian"
+        ]
+    }
+}

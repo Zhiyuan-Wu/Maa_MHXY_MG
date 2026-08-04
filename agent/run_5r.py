@@ -124,7 +124,17 @@ ROLES = {
     "晚风": "127.0.0.1:16480", #id=3 title=2
 }
 PACKAGE        = "com.netease.my"      # 游戏包名（仓库 start.json 里的 myq 是错的，用这个）
-FUBEN_ENTRY    = "fuben115"            # 组队副本 entry（base 即 全自动 接双侠士路线，无需 option）
+# 组队副本 = 5 本 fuben69new 串联（每本一个 entry，override 选目标）+ ZHUOGUI_ROUNDS 轮捉鬼。
+# (是否侠士, 第几个)：侠士 idx∈{1,2} = 50侠士/70侠士；普通 idx∈{1,2,3} = 50普通-1/2、70普通。
+# fuben69new 是"打一个副本打通关"的自包含链路，重复调用实现多本（取代旧 fuben115 一次 entry 串联）。
+# 覆盖 fuben69/fuben115 全部副本选择，详见 assets/resource/base/pipeline/fuben69new.json。
+FUBEN69NEW_PLAN = [
+    (True, 1),   # 50侠士
+    (True, 2),   # 70侠士
+    (False, 1),  # 50普通-1
+    (False, 2),  # 50普通-2
+    (False, 3),  # 70普通
+]
 # 副本完成、桥接捉鬼后跑几轮鬼。注意 **实际轮数 = max_hit + 1**：首轮由入口 钟馗-捉鬼任务-循环
 # 启动（不耗计数器），抓鬼轮次计算-max 在每轮末尾命中一次再启下一轮——故 4 轮对应 max_hit=3。
 # standalone 的 post_task 不读 interface.json option，base 默认不挂限轮器（抓鬼一轮完成→队伍满员判断
@@ -151,7 +161,9 @@ LAUNCH_STAGGER = 20                    # 启动错峰间隔秒数：ensure_insta
                                        # launch_parallel 逐账号跑 start 登录，相邻两次都至少隔这么久（0=齐发）
 TIMEOUTS = {                           # 各步墙钟超时（秒）
     "start": 600, "chuangjianduiwu": 180, "duizhang": 600,
-    "fuben": 7200, "duizhang_TR": 300, "duiyuan": 7200,
+    "fuben_per": 1800,     # 单本 fuben69new（回长安+进本+打怪+结算）墙钟超时
+    "zhuogui": 2400,       # ZHUOGUI_ROUNDS 轮捉鬼墙钟超时
+    "duizhang_TR": 300, "duiyuan": 14400,   # 队员覆盖整段 5本+捉鬼（≤4h）
     "solo": 2400,          # 单个 solo 任务的墙钟超时
     "solo_overall": 7200,  # 整轮 solo（全部账号×全部任务）的墙钟总超时；到点未完则收口退出
     "zhuagui": 14400,      # 队长无限捉鬼的墙钟安全帽（4h）；实际靠 Ctrl+C 停，到点 post_stop 收口
@@ -1144,19 +1156,51 @@ def team_form(taskers, member_names, timeouts=None):
     print(f"<<< 组队完成：已邀请 {member_names}")
 
 
-def team_run(taskers, member_names, fuben_entry=FUBEN_ENTRY, timeouts=None):
-    """执行副本 + 解散（能力 2-2）：队长跑 ``fuben_entry`` → ``5R_duizhang_TR``（解散），
-    然后停掉所有队员并回收全局 ``_TEAM_MEMBER_FUTS`` / ``_MEMBER_POOL``。
+def build_fuben69new_override(xiashi: bool, idx: int) -> dict:
+    """合成 ``fuben69new`` 的 pipeline_override（两维独立：是否侠士 + 第几个）。
 
-    ``fuben_entry`` 接 ``ZHUOGUI_ROUNDS`` 轮捉鬼：把 ``抓鬼一轮完成.next`` 改写到
-    ``抓鬼轮次计算-max``（max_hit = ZHUOGUI_ROUNDS - 1，实际跑 ZHUOGUI_ROUNDS 轮），
-    跑完 ``捉鬼-结束`` 回主界面后弹栈，副本出口兜底 ``panduan_zhujiemian``（主界面幂等，多跑一次无害）。standalone 不读
-    interface.json option，故 base 默认无限循环——必须在此显式接限轮器。
+    - 维度A（类型）→ override ``fuben69new-路由-类型`` 的 next：侠士先点侠士tab、普通直走序号路由。
+    - 维度B（序号）→ 同时 override 侠士/普通两个序号路由节点 next；运行时只有被维度A
+      路由到的那条线生效，另一条永不到达，故无需按 xiashi 分支选 target。
+
+    链路与两维节点设计详见 ``assets/resource/base/pipeline/fuben69new.json``。
+    """
+    type_next = (["fuben69new-选择侠士副本-tab"] if xiashi
+                 else ["fuben69new-路由-序号-普通"])
+    return {
+        "fuben69new-路由-类型": {"next": type_next},
+        "fuben69new-路由-序号-侠士": {"next": [f"fuben69new-进入-侠士-{idx}"]},
+        "fuben69new-路由-序号-普通": {"next": [f"fuben69new-进入-普通-{idx}"]},
+    }
+
+
+def team_run(taskers, member_names, timeouts=None):
+    """执行 5 本副本 + ZHUOGUI_ROUNDS 轮捉鬼 + 解散（能力 2-2）。
+
+    队长串行跑 :data:`FUBEN69NEW_PLAN` 里的 5 个副本——每本一次
+    ``run_task("fuben69new", override=build_fuben69new_override(...))``，再跑 ``zhuoguirenwu``
+    限 ``ZHUOGUI_ROUNDS`` 轮捉鬼，最后 ``5R_duizhang_TR`` 解散、停掉队员。
+
+    取代旧的一次 ``post_task("fuben115")`` 串联；fuben69new 是"打一个副本"的自包含链路，重复调用
+    实现多本。队员在 :func:`team_form` submit 的 ``5R_duiyuan`` 是长任务，覆盖整段副本+捉鬼，队长
+    每次 post 新 entry 时队员端循环自动响应（进本/打怪/结算），无需重新组队。
+
+    捉鬼限轮：把 ``抓鬼一轮完成.next`` 改写到 ``抓鬼轮次计算-max``（max_hit = ZHUOGUI_ROUNDS - 1，
+    实际跑 ZHUOGUI_ROUNDS 轮），跑完 ``捉鬼-结束`` 回主界面。standalone 不读 interface.json option，
+    base 默认无限循环——必须在此显式接限轮器。
     """
     timeouts = {**TIMEOUTS, **(timeouts or {})}
     L = taskers["队长"]
 
-    fuben_override = {
+    # 5 本副本：fuben69new 单本链路，重复调用 with 不同 override
+    for xiashi, idx in FUBEN69NEW_PLAN:
+        run_task(L, "fuben69new",
+                 override=build_fuben69new_override(xiashi, idx),
+                 timeout=timeouts["fuben_per"],
+                 label=f"队长 fuben69new {'侠士' if xiashi else '普通'}-{idx}")
+
+    # ZHUOGUI_ROUNDS 轮捉鬼：已有 zhuoguirenwu + 限轮器（entry 自带回长安城找钟馗导航）
+    zhuogui_override = {
         "抓鬼一轮完成": {"next": [
             "[JumpBack]抓鬼一轮完成-再次点击确定",
             "抓鬼轮次计算-max",
@@ -1164,18 +1208,20 @@ def team_run(taskers, member_names, fuben_entry=FUBEN_ENTRY, timeouts=None):
         ]},
         "抓鬼轮次计算-max": {"max_hit": ZHUOGUI_ROUNDS - 1},
     }
-    run_task(L, fuben_entry, override=fuben_override,
-             timeout=timeouts["fuben"], label=f"队长 {fuben_entry}（+{ZHUOGUI_ROUNDS}轮鬼）")
+    run_task(L, "zhuoguirenwu", override=zhuogui_override,
+             timeout=timeouts["zhuogui"],
+             label=f"队长 zhuoguirenwu（{ZHUOGUI_ROUNDS}轮鬼）")
+
     run_task(L, "5R_duizhang_TR", timeout=timeouts["duizhang_TR"], label="队长 5R_duizhang_TR 解散")
 
     _stop_members(taskers, member_names)  # 解散后停掉队员（post_stop 中断 5R_duiyuan）+ 回收 future/池
-    print("<<< 副本+解散完成，已停掉队员")
+    print("<<< 5本副本+捉鬼+解散完成，已停掉队员")
 
 
-def team_dungeon(taskers, member_names, fuben_entry=FUBEN_ENTRY, timeouts=None):
+def team_dungeon(taskers, member_names, timeouts=None):
     """组队副本 = ``team_form`` + ``team_run``（一键入口，供 full/team 模式一次调完）。"""
     team_form(taskers, member_names, timeouts=timeouts)
-    team_run(taskers, member_names, fuben_entry=fuben_entry, timeouts=timeouts)
+    team_run(taskers, member_names, timeouts=timeouts)
 
 
 # ---------------- 能力 3：并行单人 pipeline ----------------
@@ -1556,7 +1602,6 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
         print(f"=== mumu_server 不可达或为本机，使用本地 MuMu + 本地 adb ===")
     roles = ROLES
     package = PACKAGE
-    fuben_entry = FUBEN_ENTRY
     timeouts = TIMEOUTS
     member_names = [r for r in roles if r != "队长"]
 
@@ -1595,8 +1640,8 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
         team_form(taskers, member_names, timeouts=timeouts)
 
     if mode in ("full", "team", "run", "fuben"):
-        print("=== 执行副本 + 解散 ===")
-        team_run(taskers, member_names, fuben_entry=fuben_entry, timeouts=timeouts)
+        print("=== 执行 5 本副本 + 捉鬼 + 解散 ===")
+        team_run(taskers, member_names, timeouts=timeouts)
 
     # form 模式：组队测试到此为止。停掉队员自动化（角色仍留队伍）、回收线程池，
     # 否则非守护工作线程会阻塞进程退出。
