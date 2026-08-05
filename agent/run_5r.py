@@ -1160,18 +1160,22 @@ def build_fuben69new_override(xiashi: bool, idx: int) -> dict:
     """合成 ``fuben69new`` 的 pipeline_override（两维独立：是否侠士 + 第几个）。
 
     - 维度A（类型）→ override ``fuben69new-路由-类型`` 的 next：侠士先点侠士tab、普通直走序号路由。
-    - 维度B（序号）→ 同时 override 侠士/普通两个序号路由节点 next；运行时只有被维度A
-      路由到的那条线生效，另一条永不到达，故无需按 xiashi 分支选 target。
+    - 维度B（序号）→ **只 override 当前 xiashi 对应的那个序号路由节点**（另一类型不被维度A
+      路由到、保持默认即可）。**不能两个都 override**：侠士只有 1/2、普通有 1/2/3，idx=3 时若把
+      侠士路由也 override 成 ``fuben69new-进入-侠士-3``（不存在），MaaFw PipelineChecker 校验
+      next 列表会判 Invalid → override_pipeline 失败 → post_task 返回 task_id=0 → run_task
+      死循环刷 ``runner id not found``（2026-08-05 5r 普通-3 卡死根因）。
 
     链路与两维节点设计详见 ``assets/resource/base/pipeline/fuben69new.json``。
     """
     type_next = (["fuben69new-选择侠士副本-tab"] if xiashi
                  else ["fuben69new-路由-序号-普通"])
-    return {
-        "fuben69new-路由-类型": {"next": type_next},
-        "fuben69new-路由-序号-侠士": {"next": [f"fuben69new-进入-侠士-{idx}"]},
-        "fuben69new-路由-序号-普通": {"next": [f"fuben69new-进入-普通-{idx}"]},
-    }
+    ov = {"fuben69new-路由-类型": {"next": type_next}}
+    # 只 override 当前类型对应的序号路由；另一类型不被路由到，保持默认（避免指向不存在的节点）。
+    serial_key = "fuben69new-路由-序号-侠士" if xiashi else "fuben69new-路由-序号-普通"
+    entry = f"fuben69new-进入-{'侠士' if xiashi else '普通'}-{idx}"
+    ov[serial_key] = {"next": [entry]}
+    return ov
 
 
 def team_run(taskers, member_names, timeouts=None):
