@@ -162,7 +162,7 @@ LAUNCH_STAGGER = 20                    # 启动错峰间隔秒数：ensure_insta
 TIMEOUTS = {                           # 各步墙钟超时（秒）
     "start": 600, "chuangjianduiwu": 180, "duizhang": 600,
     "fuben_per": 1800,     # 单本 fuben69new（回长安+进本+打怪+结算）墙钟超时
-    "zhuogui": 2400,       # ZHUOGUI_ROUNDS 轮捉鬼墙钟超时
+    "zhuogui": 1800,       # ZHUOGUI_ROUNDS 每轮捉鬼墙钟超时
     "duizhang_TR": 300, "duiyuan": 14400,   # 队员覆盖整段 5本+捉鬼（≤4h）
     "solo": 2400,          # 单个 solo 任务的墙钟超时
     "solo_overall": 7200,  # 整轮 solo（全部账号×全部任务）的墙钟总超时；到点未完则收口退出
@@ -1213,7 +1213,7 @@ def team_run(taskers, member_names, timeouts=None):
         "抓鬼轮次计算-max": {"max_hit": ZHUOGUI_ROUNDS - 1},
     }
     run_task(L, "zhuoguirenwu", override=zhuogui_override,
-             timeout=timeouts["zhuogui"],
+             timeout=timeouts["zhuogui"]*ZHUOGUI_ROUNDS,
              label=f"队长 zhuoguirenwu（{ZHUOGUI_ROUNDS}轮鬼）")
 
     run_task(L, "5R_duizhang_TR", timeout=timeouts["duizhang_TR"], label="队长 5R_duizhang_TR 解散")
