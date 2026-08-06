@@ -847,7 +847,7 @@ def _save_timeout_screenshot(tasker, label):
 
 
 def run_task(tasker, entry, override=None, timeout=600, label=None, watch_alive=None,
-             watch_dead_streak=3):
+             watch_dead_streak=3, sentinel=None):
     """跑一个**原生** entry，带墙钟超时：超时则 ``post_stop`` 中断。返回是否在超时内完成。
 
     自动合并 ``DEFAULT_OVERRIDES`` 里的项目建议默认值（如运镖跳过活力检测）。
@@ -864,6 +864,11 @@ def run_task(tasker, entry, override=None, timeout=600, label=None, watch_alive=
     ``watch_dead_streak`` 默认 3：要求**连续** 3 次探针 False 才判"游戏已死"。必须——pidof 瞬时为空
     （进程崩溃后自动重启的空窗）或 adb 抖动（恢复阶段 adb 操作密集）都会让单次 False 误报，过早
     掐断本可自己恢复的 start。连续 3s 才置信，仍能抓住真正被 force-stop 杀死的情况（~43s→~46s）。
+
+    ``sentinel``：可选 ``() -> bool`` 完成确认回调。``job.done`` 后调一次，返回 False 即判"假完成"
+    （走 on_error→空节点）→ run_task 返回 False，不让空节点伪装成成功。默认 None=不校验（维持
+    旧行为）。solo_all 传 ``_sentinel_main``（主界面模板识别）以抓"任务 done 但角色停在挖宝/战斗/
+    弹窗界面"的假完成（8/6 欧阳挖宝卡死→后续 7 任务全假完成即此症）。
     """
     label = label or entry
     ov = dict(override or {})
@@ -878,6 +883,11 @@ def run_task(tasker, entry, override=None, timeout=600, label=None, watch_alive=
     while time.time() < deadline:
         done = job.done  # 读这个属性会进 MaaFw native；若进程在这附近崩，faulthandler 会在 stderr 打栈
         if done:
+            if sentinel is not None and not sentinel():
+                # done 但 sentinel 不满足 = 走了空节点假成功（default_pipeline 全局 on_error:["空节点"]
+                # 让 next 超时也"成功"）。不计完成，让上层按失败处理（solo_all 计超时统计等）。
+                print(f"!!! {label} done 但 sentinel 判未达成（疑 on_error→空节点假成功），按失败计")
+                return False
             print(f"<<< {label} 完成（用时 {int(time.time() - _t0)}s）")
             return True
         if watch_alive is not None:
@@ -960,6 +970,20 @@ def _recognize(tasker, reco_type, reco_param, img):
     except Exception as e:
         print(f"    （哨兵识别异常，按未命中：{e}）")
         return False
+
+
+def _sentinel_main(tasker):
+    """默认任务完成 sentinel：跑一次主界面模板识别（纯识别、无帧差/focus，轻量）。
+
+    供 run_task 的 ``sentinel`` 参数用——任务 ``done`` 后确认角色确实在主界面，绕开
+    ``on_error:["空节点"]`` 假成功（任务入口走空节点时 done=True 但角色其实在挖宝/战斗/
+    弹窗界面）。比 ``_ready_main`` 轻：不做帧差/focus，只判主界面模板命中，适合每个 solo
+    任务后低成本复核。
+    """
+    img = _screencap(tasker)
+    if img is None:
+        return False
+    return _recognize(tasker, JRecognitionType.TemplateMatch, _MAIN_RECO, img)
 
 
 def _game_focused(adb, address, timeout=8):
@@ -1368,7 +1392,8 @@ def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=
             entry_to = (solo_timeouts or {}).get(e, per_timeout)
             this_to = entry_to if left is None else min(entry_to, left)
             try:
-                run_task(t, e, timeout=this_to, label=f"[{role}] 单人 {e}")
+                run_task(t, e, timeout=this_to, label=f"[{role}] 单人 {e}",
+                         sentinel=lambda: _sentinel_main(t))
             except Exception:
                 print(f"    [{role}] !!! {e} 抛异常：")
                 traceback.print_exc()
