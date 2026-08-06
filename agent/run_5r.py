@@ -40,6 +40,12 @@
                   支持 full/launch/solo/log_analysis 等。等价本机 ``python run_5r.py <mode>``，
                   但在 Mac 上执行。
 
+# 全局选项 ``--config <name>``（可出现在任意位置）：从 ``agent/<name>.py`` 加载配置覆盖
+                  头部配置区（ROLES / FUBEN69NEW_PLAN / SOLO_ENTRIES / KEJU_AI / 超时 等）。
+                  config 文件在 run_5r 的 globals 命名空间里 exec：同名变量赋值直接覆盖、
+                  未列出的字段保持默认、可引用 run_5r 已定义的变量。``remote`` 会把它透传给
+                  Mac 子进程。例：``python run_5r.py --config team2 full``。
+
 # 配置区（头部）：角色/地址(ROLES)、包名、副本 entry、超时、单人任务列表、远端 IP/端口。
   Win/Mac 同一份代码：REPO_DIR 由 ``__file__`` 推导（``MAA_5R_REPO`` 可覆盖）。
 """
@@ -92,6 +98,63 @@ if _IS_WINDOWS:
 # 用于定位"进程静默退出、无任何 traceback"的情况——多半是 C++ 侧（MaaFw/OCR 模型）
 # 崩了，Python 的 except/finally 根本跑不到。不加这个，这种死法完全无线索。
 faulthandler.enable(all_threads=True)
+
+
+# ---- --config <name>：从另一份 python 配置文件覆盖头部配置（队伍/任务列表等）----
+# config 文件（如 agent/team2.py）在本模块 globals() 命名空间里 exec，其内同名变量
+# 赋值直接覆盖 run_5r 全局；没列出的字段保持默认。详见下方 _apply_config 与文件 docstring。
+def _split_config(argv):
+    """从 argv 抽出全局选项 ``--config <name>``（可出现在任意位置）。
+
+    返回 ``(config_name, rest_argv)``：未指定时 config_name=''；
+    rest_argv 为去掉 ``--config`` 对之后的剩余参数（mode + 其余 args）。
+    """
+    name, rest = "", []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--config" and i + 1 < len(argv):
+            name = argv[i + 1]
+            i += 2
+        else:
+            rest.append(argv[i])
+            i += 1
+    return name, rest
+
+
+def _apply_config(name):
+    """加载 ``--config <name>`` 指定的配置文件，把其中的变量赋值覆盖到本模块全局。
+
+    搜索顺序：``agent/<name>.py`` → ``<repo>/<name>.py`` → 当作路径（相对 cwd/绝对，
+    含路径分隔符或 ``.py`` 后缀时）。文件在本模块 ``globals()`` 命名空间里 exec，故：
+
+    * 同名变量赋值**直接覆盖** run_5r 全局（ROLES / FUBEN69NEW_PLAN / SOLO_ENTRIES / …）；
+    * **未列出的字段保持 run_5r 默认**；
+    * 可引用 run_5r 已定义的变量（如 ``os`` / ``datetime`` / ``KEJU_AI``）做条件或派生。
+
+    在配置区基础变量之后、派生（DEFAULT_OVERRIDES）之前调用，使 KEJU_AI 等覆盖能让
+    DEFAULT_OVERRIDES 的 kejuxiangshi 分支正确重算。
+    """
+    if not name:
+        return
+    candidates = [
+        os.path.join(REPO_DIR, "agent", f"{name}.py"),
+        os.path.join(REPO_DIR, f"{name}.py"),
+    ]
+    if os.sep in name or "/" in name or name.endswith(".py"):
+        candidates.insert(0, name)
+    path = next((p for p in candidates if os.path.isfile(p)), None)
+    if path is None:
+        raise RuntimeError(
+            f"--config {name!r} 找不到配置文件（搜索过：{candidates}）")
+    print(f"=== 加载配置覆盖：{path} ===")
+    with open(path, encoding="utf-8") as f:
+        code = f.read()
+    exec(compile(code, path, "exec"), globals())
+
+
+# 顶部预解析 --config：本进程 apply 用 _CONFIG_NAME（下方配置区调用 _apply_config）；
+# __main__ / _remote_client 用 _ARGV_REST（已去掉 --config 对）。
+_CONFIG_NAME, _ARGV_REST = _split_config(sys.argv[1:])
 
 # ==================== 配置区（移动脚本 / 换机器时改这里）====================
 # 仓库根目录（须含 assets/ agent/）。默认按 __file__ 推导（agent/run_5r.py 的上上级 = 仓库根），
@@ -186,6 +249,11 @@ KEJU_AI = {
     "url": "https://api.deepseek.com",
     "model": "deepseek-v4-flash",
 }
+
+# ---- 应用 --config <name> 覆盖：基础配置之后、派生（DEFAULT_OVERRIDES）之前 ----
+# config 对 ROLES/FUBEN69NEW_PLAN/SOLO_ENTRIES/KEJU_AI 等的覆盖在此生效；放此处是为了
+# 让下方 DEFAULT_OVERRIDES 的 kejuxiangshi 分支基于覆盖后的 KEJU_AI 重新判定。
+_apply_config(_CONFIG_NAME)
 # =========================================================================
 # 以下为派生路径与内部常量，一般无需修改
 RESOURCE_PATH = os.path.join(REPO_DIR, "assets", "resource", "base")
@@ -218,7 +286,10 @@ SHARED_TOKEN = os.environ.get("MAA_5R_TOKEN", "")   # 可选 bearer；空 = 不�
 #                    （参照 pipeline 自带「召唤灵室-未开启→卧室-点击打理」，保留大扫除+卧室回活力）。
 #   kejuxiangshi    「是否使用Ai进行答题=Yes」：仅当上方 KEJU_AI 填了 key 才启用，否则走 pipeline
 #                    默认的普通答题（见 KEJU_AI 注释）。
-DEFAULT_OVERRIDES = {
+# 若 ``--config`` 已整体覆盖 DEFAULT_OVERRIDES（在上方 _apply_config 里赋值），尊重 config 的值；
+# 否则用下列 run_5r 默认。KEJU_AI 联动：即使 config 覆盖了 DEFAULT_OVERRIDES，只要它没显式写
+# kejuxiangshi 且 KEJU_AI 有 apikey，仍自动补（让 config 改 KEJU_AI 即可启用 AI 答题）。
+DEFAULT_OVERRIDES = globals().get("DEFAULT_OVERRIDES") or {
     "yunbiao_renwu2": {"活动-运镖": {"next": ["活动-运镖-点击日常活动"]}},
     "mijing_renwu": {
         "秘境降妖-选择模式": {"next": ["秘境降妖-选择海底秘境"]},
@@ -235,7 +306,7 @@ DEFAULT_OVERRIDES = {
         "点击管家寻路": {"next": ["卧室-点击打理", "[JumpBack]panduan_zhujiemian"]},
     },
 }
-if KEJU_AI.get("apikey"):
+if KEJU_AI.get("apikey") and "kejuxiangshi" not in DEFAULT_OVERRIDES:
     # AIAnswer 从节点 attach 读 apikey/url/model，三项缺一不可；url 要带 /v1/chat/completions。
     DEFAULT_OVERRIDES["kejuxiangshi"] = {
         "活动-科举乡试-进入答题界面": {"next": [
@@ -1336,6 +1407,9 @@ def print_help():
     print("    remote <mode> [args]（Win→Mac 提交；如 remote full / remote solo shimen_renwu_new --ids 1）")
     print("    remote cancel    显式取消 cli_server 当前在跑的任务（Ctrl+C 只断开，任务继续在 Mac 跑）")
     print("    remote show      显示 cli_server 当前在跑的任务 + 最近日志尾")
+    print("  --config <name>   全局选项（任意位置）：从 agent/<name>.py 加载配置覆盖 run_5r 头部")
+    print("                    （ROLES/任务列表/超时等）；没列出的字段保持默认。remote 模式会透传给 Mac")
+    print("                    例: --config team2 full   |   remote --config team2 full")
     print("\n常用单人任务名（solo 可指定）：")
     for k, v in SOLO_TASKS_HELP.items():
         print(f"  {k:18} {v}")
@@ -1593,6 +1667,8 @@ def be_adb_connect(address):
 
 def main(mode="full", solo_tasks=None, solo_ids=None):
     open_log()  # 先开日志：后续所有 print 自动加 [时间戳] 前缀并 tee 到 DEBUG_DIR/run_5r/
+    if _CONFIG_NAME:
+        print(f"=== 当前配置覆盖：--config {_CONFIG_NAME}（本配置文件 > run_5r 默认）===")
     _assert_repo()
     # 探测远端 mumu_server：healthy（且非本机）→ remote（Mac 期望路径，经 Win:5038 adb + Win:5080 生命周期
     # API）；否则 local（Win 直达，沿用旧行为）。详见 plan §C。Mac 上 WIN_IP 非本机 → 探到即 remote；
@@ -1812,7 +1888,11 @@ class _MuMuHandler(BaseHTTPRequestHandler):
         path, query = parts.path, urllib.parse.parse_qs(parts.query)
         try:
             if path == "/health":
-                adb_up = _dedicated_adb_up() or _start_dedicated_adb()   # 自愈
+                # 自愈：仅"5038 在跑"不够——还须绑了 0.0.0.0。落到 127.0.0.1 时 _dedicated_adb_up
+                # 仍为 True（本机 adb 够得到），但 Mac 经 Tailscale 够不到、SYN 被默认 Block 静默
+                # 丢弃（~75s 超时）。故把 bind 校验并进"已健康"快路径；bind 不达标即落到
+                # _start_dedicated_adb 重建（kill loopback-only 残留 + 用 -a 重绑 0.0.0.0）。
+                adb_up = (_dedicated_adb_up() and _dedicated_bind_ok()) or _start_dedicated_adb()
                 mumu_ok = True
                 try:
                     mumu_info("0")
@@ -1928,6 +2008,8 @@ def _spawn_job(job_id, body):
     """子进程跑 ``python run_5r.py <mode> [args]``；stdout 逐行读进 job['lines']。"""
     mode = body.get("mode", "full")
     cmd = [sys.executable, os.path.abspath(__file__), mode]
+    if body.get("config"):
+        cmd += ["--config", str(body["config"])]
     if mode == "solo":
         if body.get("solo_ids"):
             cmd += ["--ids", ",".join(str(i) for i in sorted(body["solo_ids"]))]
@@ -2132,7 +2214,11 @@ def _remote_client(argv):
     import requests   # 客户端侧（已在 requirements）；懒加载，server 端不依赖
     base = os.environ.get("MAA_5R_CLI_URL", f"http://{MAC_IP}:{CLI_API_PORT}")
     headers = {"Authorization": "Bearer " + SHARED_TOKEN} if SHARED_TOKEN else {}
-    args = list(argv or [])
+    # 扫 argv 里的 --config；没有则回退本进程启动时的 _CONFIG_NAME（--config 可能写在
+    # `remote` 之前，已被顶部 _split_config 抽进 _CONFIG_NAME，这里补回以透传给 Mac 子进程）。
+    config_name, args = _split_config(list(argv or []))
+    if not config_name:
+        config_name = _CONFIG_NAME
     mode = args[0] if args else "full"
 
     # ---- 显式取消：remote cancel —— 取消 cli_server 当前在跑的 job（job 在 Mac，独立于本客户端）----
@@ -2177,6 +2263,8 @@ def _remote_client(argv):
 
     # ---- 提交任务 + 轮询日志 ----
     body = {"mode": mode}
+    if config_name:
+        body["config"] = config_name
     if mode == "solo":
         ids, tasks = _parse_ids_flag(args[1:])
         if ids:
@@ -2230,7 +2318,7 @@ def _remote_client(argv):
 
 
 if __name__ == "__main__":
-    _args = sys.argv[1:]
+    _args = _ARGV_REST   # sys.argv[1:] 已去掉 --config 对（见模块顶部 _split_config）
     _mode = _args[0] if _args else "full"
     # 服务/客户端模式：在 TerminateProcess try 之前分流，各自独立退出（不经那套 finally）
     if _mode in ("-h", "--help", "help"):
