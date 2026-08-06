@@ -231,8 +231,10 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
     "solo_overall": 7200,  # 整轮 solo（全部账号×全部任务）的墙钟总超时；到点未完则收口退出
     "zhuagui": 14400,      # 队长无限捉鬼的墙钟安全帽（4h）；实际靠 Ctrl+C 停，到点 post_stop 收口
 }
-SOLO_ENTRIES = ["shuangbei", "huoli", "fuli_qiandao", "shimen_renwu_new", "yunbiao_renwu2", "baotu_renwu", "wabaotu_qingli", "打开大地图_69副本",
-                "mijing_renwu", "打开大地图_69副本", "sanjieqiyuan", "huoyue_lingqu", "zhengli_baibao", "jiayuan_zhengli", "huoli", "zhanghao_xinxi"]
+# 单人任务列表（任务间自动插 barrier：solo_all 每个entry前 sleep5 + 打开大地图重置位置，
+# 故这里不再手动插"打开大地图_69副本"）。
+SOLO_ENTRIES = ["shuangbei", "huoli", "fuli_qiandao", "shimen_renwu_new", "yunbiao_renwu2", "baotu_renwu", "wabaotu_qingli",
+                "mijing_renwu", "sanjieqiyuan", "huoyue_lingqu", "zhengli_baibao", "jiayuan_zhengli", "huoli", "zhanghao_xinxi"]
 
 if datetime.now().weekday() == 3:
     SOLO_ENTRIES.insert(0, "bangpai_renwu")
@@ -895,6 +897,25 @@ def run_task(tasker, entry, override=None, timeout=600, label=None, watch_alive=
     return False
 
 
+def _barrier_reset(tasker, role, per_timeout=60):
+    """任务间隔离 barrier：sleep 5s + 跑「打开大地图_69副本」重置角色位置到稳定主界面。
+
+    防止前一任务卡死/停在异常界面（战斗/挖宝/弹窗）污染后续任务——典型场景：欧阳
+    wabaotu 卡在挖宝界面，后续 7 个单人任务入口全 on_error→空节点假完成（8/6 实例）。
+    打开大地图→关闭 把角色拉回稳定主界面锚点，等价"任务间显式回主界面"哨兵；副本间
+    用它让长安城 UI 稳定（防普通-2/3 连续进本时 ClickKey 小地图键被吞）。
+
+    尽力清场：barrier 自身失败/超时不抛（打 warning 继续），职责只是提高下一任务成功率，
+    非硬前置；整轮预算由 solo_all 的 overall_deadline 兜底。
+    """
+    time.sleep(5)
+    try:
+        run_task(tasker, "打开大地图_69副本", timeout=per_timeout,
+                 label=f"[{role}] barrier 打开大地图")
+    except Exception as e:
+        print(f"    [{role}] barrier 异常（忽略继续）：{e}")
+
+
 # ---------------- 启动就绪哨兵：主界面确认 + L1/L3 自愈 ----------------
 # ensure_instances/ensure_process 只能保证"设备开机 + 游戏进程存活"，抓不住:
 #   A. 起来 >10s 后闪退（pidof 双重检查的 10s 窗口早过）；
@@ -1269,6 +1290,7 @@ def team_run(taskers, member_names, timeouts=None):
 
     # 5 本副本：fuben69new 单本链路，重复调用 with 不同 override
     for xiashi, idx in FUBEN69NEW_PLAN:
+        _barrier_reset(L, "队长")
         run_task(L, "fuben69new",
                  override=build_fuben69new_override(xiashi, idx),
                  timeout=timeouts["fuben_per"],
@@ -1283,10 +1305,12 @@ def team_run(taskers, member_names, timeouts=None):
         ]},
         "抓鬼轮次计算-max": {"max_hit": ZHUOGUI_ROUNDS - 1},
     }
+    _barrier_reset(L, "队长")
     run_task(L, "zhuoguirenwu", override=zhuogui_override,
              timeout=timeouts["zhuogui"]*ZHUOGUI_ROUNDS,
              label=f"队长 zhuoguirenwu（{ZHUOGUI_ROUNDS}轮鬼）")
 
+    _barrier_reset(L, "队长")
     run_task(L, "5R_duizhang_TR", timeout=timeouts["duizhang_TR"], label="队长 5R_duizhang_TR 解散")
 
     _stop_members(taskers, member_names)  # 解散后停掉队员（post_stop 中断 5R_duiyuan）+ 回收 future/池
@@ -1340,6 +1364,7 @@ def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=
             if left is not None and left <= 0:
                 print(f"    [{role}] 整轮超时，停止后续单人任务")
                 return
+            _barrier_reset(t, role)   # 任务间隔离：sleep5 + 打开大地图重置位置（防前一任务卡死污染）
             entry_to = (solo_timeouts or {}).get(e, per_timeout)
             this_to = entry_to if left is None else min(entry_to, left)
             try:

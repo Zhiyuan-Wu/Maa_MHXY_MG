@@ -56,11 +56,12 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
     "solo": 2400, "solo_overall": 7200, "zhuagui": 14400,
 }
 
-# 单人任务列表。先整体赋值（覆盖 run_5r 默认 + 其 weekday 调整结果），再做与 run_5r.py
+# 单人任务列表（任务间由 run_5r.solo_all 自动插 barrier：sleep5 + 打开大地图重置位置，
+# 故这里不手动插"打开大地图_69副本"）。先整体赋值（覆盖 run_5r 默认），再做与 run_5r.py
 # 一致的星期调整（此处赋值后列表是"基础列表"，insert 不会与 run_5r 的调整重复）。
 SOLO_ENTRIES = ["shuangbei", "huoli", "fuli_qiandao", "shimen_renwu_new", "yunbiao_renwu2",
-                "baotu_renwu", "wabaotu_qingli", "打开大地图_69副本",
-                "mijing_renwu", "打开大地图_69副本", "sanjieqiyuan", "huoyue_lingqu",
+                "baotu_renwu", "wabaotu_qingli",
+                "mijing_renwu", "sanjieqiyuan", "huoyue_lingqu",
                 "zhengli_baibao", "jiayuan_zhengli", "huoli", "zhanghao_xinxi"]
 if datetime.now().weekday() == 3:   # 周四
     SOLO_ENTRIES.insert(0, "bangpai_renwu")
