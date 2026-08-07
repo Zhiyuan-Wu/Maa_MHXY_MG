@@ -229,6 +229,7 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
     "duizhang_TR": 300, "duiyuan": 14400,   # 队员覆盖整段 5本+捉鬼（≤4h）
     "solo": 2400,          # 单个 solo 任务的墙钟超时
     "solo_overall": 7200,  # 整轮 solo（全部账号×全部任务）的墙钟总超时；到点未完则收口退出
+    "bangpai_renwu": 3600,
     "zhuagui": 14400,      # 队长无限捉鬼的墙钟安全帽（4h）；实际靠 Ctrl+C 停，到点 post_stop 收口
 }
 # 单人任务列表（任务间自动插 barrier：solo_all 每个entry前 sleep5 + 打开大地图重置位置，
@@ -1899,24 +1900,28 @@ def _connect_roles_into_dedicated():
 
 
 def _start_dedicated_adb():
-    """启动专用 0.0.0.0:ADB_SERVER_PORT adb server（幂等）。
-    已起且绑了 0.0.0.0 → 复用；已起但只绑 127.0.0.1（旧 adb / 残留）→ kill 后用现代 adb 重绑。"""
-    if _dedicated_adb_up():
+    """启动专用 0.0.0.0:ADB_SERVER_PORT adb server（幂等）。**只认 0.0.0.0**——只绑 127.0.0.1
+    （Mac 经 Tailscale 够不到，等同没起）视为未启动；返回值 = 是否成功绑 0.0.0.0。
+
+    已起且绑 0.0.0.0 → 复用；已起但只绑 127.0.0.1（旧 adb / 残留 / 裸 adb 探活复活）→ kill
+    后用现代 adb 重绑；start-server 后仍非 0.0.0.0 → 再 kill 重试一次（旧 MuMu adb 36.0.0
+    的 -a 失效、或 start-server 竞态）。"""
+    for _attempt in (1, 2):
+        if _dedicated_adb_up() and not _dedicated_bind_ok():
+            print(">>> 专用 5038 仅绑 127.0.0.1（残留 / 裸 adb 探活复活），kill 后用 -a 重绑 0.0.0.0")
+            _stop_dedicated_adb()
+            time.sleep(0.8)
         if _dedicated_bind_ok():
-            _connect_roles_into_dedicated()
-            return True
-        print(">>> 专用 5038 仅绑 127.0.0.1（旧 MuMu adb 起的残留），kill 后用现代 adb 重绑 0.0.0.0")
-        _stop_dedicated_adb()
-        time.sleep(0.8)
-    try:
-        # -a 绑 0.0.0.0（需 ≥37 的 platform-tools adb；MuMu 36.0.0 不认）；start-server 自守护。
-        subprocess.run([_dedicated_adb(), "-a", "-P", str(ADB_SERVER_PORT), "start-server"],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
-    except Exception as e:
-        print(f"!! 启动专用 adb server 异常：{e}")
-    time.sleep(1.0)
+            break
+        try:
+            # -a 绑 0.0.0.0（需 ≥37 的 platform-tools adb；MuMu 36.0.0 不认）；start-server 自守护。
+            subprocess.run([_dedicated_adb(), "-a", "-P", str(ADB_SERVER_PORT), "start-server"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
+        except Exception as e:
+            print(f"!! 启动专用 adb server 异常：{e}")
+        time.sleep(1.0)
     _connect_roles_into_dedicated()
-    return _dedicated_adb_up()
+    return _dedicated_bind_ok()
 
 
 def _stop_dedicated_adb():
@@ -2016,14 +2021,15 @@ class _MuMuHandler(BaseHTTPRequestHandler):
 def run_mumu_server(argv=None):
     """mumu_server 模式：起专用 adb server + HTTP API（不加载 Maa 资源）。"""
     print(f"=== mumu_server：专用 adb server 0.0.0.0:{ADB_SERVER_PORT} + HTTP API 0.0.0.0:{MUMU_API_PORT} ===")
+    # **只以 0.0.0.0 启动，拒绝本地模式**：专用 adb 必须绑 0.0.0.0，Mac 经 Tailscale 才够得到。
+    # 绑不成 0.0.0.0（_dedicated_adb 落到 MuMu 自带旧 adb 36.0.0、-a 失效只绑 127.0.0.1）→ 直接
+    # 退出，绝不带病上线——否则 /health 假报 adb_up、Mac 远程全 ~75s 超时（见 memory pitfall #5）。
     if not _start_dedicated_adb():
-        print("!! 专用 adb server 启动失败（继续；/health 会自愈）")
-    elif not _dedicated_bind_ok():
-        print(f"!! 警告：专用 adb server 未绑 0.0.0.0:{ADB_SERVER_PORT}（Mac 经 Tailscale 够不到）——")
-        print(f"!!   _dedicated_adb 用了 MuMu 自带旧 adb（36.0.0，-a 失效，只绑 127.0.0.1）。")
-        print(f"!!   设 MAA_5R_DEDICATED_ADB=<≥37 的 platform-tools/adb.exe> 后重启 mumu_server。")
-    else:
-        print(f"<<< 专用 adb server 就绪 0.0.0.0:{ADB_SERVER_PORT}（不碰 MuMu 5037）")
+        print(f"!! 专用 adb server 未能绑 0.0.0.0:{ADB_SERVER_PORT}（仍 127.0.0.1 或未起）——拒绝以本地模式启动。")
+        print("!!   多半 _dedicated_adb 用了 MuMu 自带旧 adb（36.0.0，-a 失效）。")
+        print(f"!!   设 MAA_5R_DEDICATED_ADB=<≥37 的 platform-tools/adb.exe>（默认 C:\\dev\\platform-tools\\adb.exe）后重启 mumu_server。")
+        return 1
+    print(f"<<< 专用 adb server 就绪 0.0.0.0:{ADB_SERVER_PORT}（拒绝本地模式；不碰 MuMu 5037）")
     httpd = ThreadingHTTPServer(("0.0.0.0", MUMU_API_PORT), _MuMuHandler)
     print(f"<<< mumu_server 就绪：HTTP 0.0.0.0:{MUMU_API_PORT}（Mac 经此 + adb:5038 远控；Ctrl+C 退出）")
     try:
