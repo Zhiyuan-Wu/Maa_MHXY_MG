@@ -147,12 +147,15 @@
     },
     "秘境降妖-选择模式": {
         "recognition": "TemplateMatch",
-        "template": "mijing/mijing_moshi.png",
+        "template": [
+            "mijing/mijing_moshi.png",
+            "mijing/mijing_moshi_yaochi.png"
+        ],
         "roi": [
-            231,
-            85,
-            774,
-            106
+            107,
+            32,
+            1030,
+            268
         ],
         "next": [
             "秘境降妖-选择海底秘境"
