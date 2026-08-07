@@ -62,6 +62,7 @@
             "zonghe/tab_changancheng2.png",
             "zonghe/tab_changancheng3.png"
         ],
+        "order_by": "Score",
         "pre_delay": 1000,
         "action": "Click",
         "post_delay": 1000,
@@ -274,6 +275,25 @@
     },
     "fuben69new-进入-侠士-1-失败重试": {
         "max_hit": 2,
+        "recognition": "OCR",
+        "expected": [
+            "进入"
+        ],
+        "roi": [
+            316,
+            570,
+            150,
+            52
+        ],
+        "pre_delay": 1000,
+        "action": "DoNothing",
+        "post_delay": 1000,
+        "next": [
+            "fuben69new-进入-侠士-1-失败重试-确认",
+            "空节点"
+        ]
+    },
+    "fuben69new-进入-侠士-1-失败重试-确认": {
         "recognition": "OCR",
         "expected": [
             "进入"

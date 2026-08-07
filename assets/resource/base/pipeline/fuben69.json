@@ -111,6 +111,7 @@
             "zonghe/tab_changancheng2.png",
             "zonghe/tab_changancheng3.png"
         ],
+        "order_by": "Score",
         "pre_delay": 1000,
         "action": "Click",
         "post_delay": 1000
