@@ -17,6 +17,17 @@ description: 排查"梦幻西游五开"（agent/run_5r.py）运行日志的 SOP�
 
 > maafw.log 在 ~16MB 时轮转成 `maafw.bak.<时间戳>.log`。多 Tasker 并发时偶尔会轮转出 **5 份相同 bak**（日志轮转竞态，无害）。
 
+> **remote 模式（Mac cli_server 执行，8/6 起为常态）**：日志/截图全在 Mac（`100.116.176.34`，ssh 用户 `imac`，仓库 `/Users/imac/dev/Maa_MHXY_MG`），本地没有。流程：①curl cli_server 确认 job → ②ssh/scp 拉到本地 `debug/` → ③按下列 SOP 分析。
+> ```bash
+> curl -s http://100.116.176.34:5090/jobs    # job 列表 + exit（exit=0 ≠ 成功，见 ③）
+> curl -s http://100.116.176.34:5090/health  # current_job 是否还在
+> ssh imac@100.116.176.34 'ls -lt /Users/imac/dev/Maa_MHXY_MG/debug/run_5r/run_5r_<YYYYMMDD>_*.log | head'
+> scp imac@100.116.176.34:/Users/imac/dev/Maa_MHXY_MG/debug/run_5r/run_5r_<...>.log ./debug/run_5r/
+> # 截图（中文文件名：单引号包整个 remote spec，scp 认 UTF-8）
+> scp 'imac@100.116.176.34:/Users/imac/dev/Maa_MHXY_MG/debug/debug/timeout/<中文>.png' ./shot.png
+> ```
+> **坑**：`ssh mac 'grep 中文 file'` 远程 grep 中文 **0 命中**（locale 不通）——改用 `ssh mac 'python3' <<'PY' ... PY` 读文件（`repr`/`os.listdir` 输出避开终端 GBK）。详见 [[mac-5r-remote-logs-lookup]]。
+
 ## 1. 账号 / 实例对照表（排查必备）
 
 编排层日志里是角色名（队长/渣中/6130/缤纷/晚风）；原生层 + PowerShell 里是端口/MuMu 索引。对照（来自 `run_5r.py::ROLES`，端口约定 `16384+32*idx`）：
@@ -166,6 +177,25 @@ powershell.exe -NoProfile -Command "\$live=(Get-CimInstance Win32_Process).Proce
 - **mijing 0 冲关 = 停止门修复见效**：`pipeline_override` 里 `海底秘境-指定关卡结束任务.expected` 已由 `["第25关"]` 扩成 `["第25关"…"第30关"]`，结局 = 4×第25关停 + 1×shibai（晚风 1154s 失败退，合法出口）。**这是 07.24 已知④的直接修复证据。**
 - **keju 全员 ~50s ⚠ 但要警惕**：50s **不是"答得快"，是没答**——全员走 `向上滑动到顶端` 假成功出口，见 §5 ⑨。
 - **zhuogui「方案二」限轮器实跑验证通过**：fuben115(+2轮鬼) 阶段 `捉鬼-fuben桥接`→`抓鬼轮次计算-max`(=max_hit)→`捉鬼-结束` 整链各命中 1 次，全日志 0 处旧节点名（`抓鬼轮次计算-max-fuben`/`捉鬼-fuben结束`）。
+
+### 实例（08.06，秒——副本后半 + 连锁假成功 + bangpai 爆炸）
+
+| 任务 | 队长 | 渣中 | 6130 | 欧阳 | 晚风 |
+|---|---|---|---|---|---|
+| fuben69new(5本) | 506/541/362/**34⚠**/**34⚠** | (队员跟随队长) | | | |
+| zhuogui(4轮) | **31⚠** | | | | |
+| bangpai | 1494 | X2400 | X2400 | 2226 | X2400 |
+| shimen | 833 | 739 | X2400 | 1088 | 421 |
+| wabaotu | 625 | 501 | 392 | **X2400** | 397 |
+| mijing | 1401 | 1667 | X预算 | **41⚠** | 1156 |
+| 欧阳后续7项 | | | | sanjie/huoyue/zhengli/jiayuan/huoli/zhanghao **全 41⚠** | |
+
+> 8/6 集中爆发的**四类新信号**（均见 §5 ⑬–⑯）：
+> - **副本后几本骤降到 30s 级**（34/34s）+ 捉鬼 31s = 连续进本 UI 时序假完成（⑬，ClickKey 小地图键被吞）。
+> - **某号超时后整串恒定 ~41s**（欧阳 wabaotu 超时→后续 7 任务全 41s）= 连锁假完成（⑮，前一任务卡死没回主界面，污染后续入口）。
+> - **bangpai 全员 1500–2400s** = 战斗爆炸 + 寻路异常（⑯）。
+> - **shimen 单号超时**（6130）= 装备上交验证码弹窗（⑭，随机触发）。
+> - **已修**：⑬⑮ 用 `run_5r` 的 `_barrier_reset`（任务间 sleep5+打开大地图）+ `run_task.sentinel`（done 后校验主界面）堵（commit `93badad`/`a3add01`）；⑭⑯ 待修。
 
 ### 报告二：账号金币·银币变化量
 
@@ -327,6 +357,39 @@ print('\n三门全 0 = 本次新题干净。门1 硬错误应删该 cache 条让
 " agent/data/keju_ai_cache.json 2026-07-30
 ```
 
+### 4.1 节点级追踪 + 截图视觉分析（8/6 实战补充）
+
+```bash
+# A) 按时段筛 on_error（定位副本段/某任务段的 on_error 分布）——远程 grep 中文 0 命中，用 python
+ssh imac@100.116.176.34 'python3' <<'PY'
+import os
+from collections import Counter
+oe="/Users/imac/dev/Maa_MHXY_MG/debug/debug/on_error"
+fs=sorted(f for f in os.listdir(oe) if f.startswith("2026.08.06"))
+print("by name:", Counter(f.split("_",1)[1].replace(".png","") for f in fs).most_common(15))
+for f in fs:
+    if "17.08" <= f[11:16] <= "17.35": print("fuben段:", f)   # 按时段筛
+PY
+
+# B) 按线程(Tx)追踪单账号节点序列——5 账号在 maafw 按 Tx 线程交错，
+#    先 grep "task start" 拿各账号 Tx（队长从副本段起固定某 Tx），再筛该 Tx 的 reco hit
+"$PY" -c "
+import re,collections
+lines=open(r'debug/debug/maafw.bak.<覆盖该时段>.log',encoding='utf-8',errors='replace').read().splitlines()
+hits=[(i,l[11:19],m.group(1)) for i,l in enumerate(lines)
+      if '[Tx45157]' in l and (m:=re.search(r'reco hit \[result\.name=([^\]]+)\]',l))]
+seg=[h for h in hits if h[0]>=<任务起始line>]      # 例：队长 bangpai 段
+print('命中:',len(seg)); [print(f'{c:5} {n}') for n,c in collections.Counter(h[2] for h in seg).most_common(20)]
+for h in seg[:12]+seg[-15:]: print('L%d %s %s'%h)  # 头12/尾15 看入口与终态（真完成 vs 假成功）
+"
+#   .bak 选哪份：maafw.bak.<时间戳> 的时间戳=滚动时刻（上一份 log 结束写入），
+#   覆盖该时间戳之前的时段。例：18.00.27 的 bak 含 17:25–18:00（副本+队长 bangpai）。
+
+# C) 截图视觉分析：timeout/on_error 截图用图像分析工具读"卡在哪一帧"
+#    prompt 要点：当前界面（主界面/战斗/挖宝/弹窗）、可见中文、角色是否卡异常状态、为何超时。
+#    例：8/6 shimen 截图→"装备上交"弹窗+验证码（⑭）；wabaotu→"挖宝中"没回主界面（⑮）。
+```
+
 ## 5. 已知问题速查表
 
 | # | 症状 / 日志特征 | 判定 | 处置 / 说明 |
@@ -345,6 +408,10 @@ print('\n三门全 0 = 本次新题干净。门1 硬错误应删该 cache 条让
 | ⑩ | yunbiao 某号"完成"且耗时不算很短（~480–510s），但 `点击押送普通镖_确定` 只命中 1~2 次（应 3）；trace：`押送1→确定1→运镖中×N→[5~7分钟 点击押送普通镖银(三次) OCR 全 miss]→活动-运镖-开始-点击参加 on_error→运镖完成onerror` | **运镖假完成（只跑 1~2 镖）** | `活动-运镖-开始-点击参加` 的 next 只有 `[押送, 运镖中, 战斗中-等待20秒]`，**无兜底回主界面/重开面板的回旋门**；且 JumpBack 回 `参加` 后**不重新 Click 参加**（只重扫 next）。第 1 镖运到后押送面板若没回到可识别状态（被奖励/奇遇弹窗遮挡，或需重点"参加"），押送 OCR（roi `[933,262,307,237]`）持续 miss → 干等到 on_error 假完成。07.26 渣中/缤纷/6130 均 `确定×1`，队长/晚风 `确定×3` 正常。**判别**：Python 解析 maafw 按号（Tx→角色见 §1）数 `点击押送普通镖_确定`，<3 即中。**堵法**：参加节点 next 末尾加 `[JumpBack]panduan_zhujiemian` 或"重开运镖面板"回旋门；或 run_5r 加 sentinel 校验押送次数 |
 | ⑪ | `agent/data/account_info.log` 全行 `账号ID: (未知账号)`，但金币/银币数字正常；loguru（`debug/custom/<日期>.log`）里同号 `[logOcr] 暂存账号ID: <数字>` 与 `[logOcr] 已写入: ...(未知账号)` **共存**，0 异常；maafw 里 `账号信息-记录账号ID`/`记录金币银币` 节点均命中、`_logOcr_probe`(logOcr 内部 OCR 探针，经 `context.run_recognition` 调用，日志格式是 `[MaaContextRunRecognition]` **不是** `reco hit`) 命中 >0 | **logOcr `_PENDING` key 失配（5 开并发）** | `agent/custom/action/logOcr.py:74,84` 用 `id(context.tasker)` 做跨节点暂存 key。5 开并发下 MaaFw 每次 Custom Action 调用传入的 tasker 代理对象不同 → `id()` 在 mode=id 与 mode=coins 两次不同 → `pop` 拿不到写入的条目 → 返回 `"(未知账号)"`（`logOcr.py:84`）。**单开测试不复现**（07.26 凌晨 00:17 单开正常）。`(未知账号)`≠`(未识别)`：前者=跨节点 key 丢了，后者=单次 ROI OCR 失败（`logOcr.py:53`，会写成 `账号ID: (未识别)`）。**堵法（已实施 07.27）**：logOcr 改用 `context.tasker.controller.info["adb_serial"]`（如 `127.0.0.1:16576`，通过 controller 的 C handle 查、**不依赖 Python wrapper 对象身份**，跨节点稳定）做账号标识；pipeline 删掉 mode=id 整条人物界面链（`zhanghao_xinxi.json` 7 节点→4 节点），只留 `打开背包→记录金币银币` 单 logOcr 节点。**渣中(16576) 单跑实测通过**：`账号: 127.0.0.1:16576 | 金币: 246537 | 银币: 5865248`，不再 `(未知账号)`。判此 bug 是否复现：看 account_info.log 是否出现 `账号: <ip:port>`（新）而非 `账号ID: (未知账号)`（旧） |
 | ⑫ | fuben115 报"完成"但**最后一个副本(50普通-3)没打 + 2 轮鬼没抓**；maafw 里 `115点击地图-百晓仙子-70普通-3` 走 `on_error→空节点`(on_error 截图 OCR 到"师门任务/张百忍来信"而非"选择副本")，`捉鬼-fuben桥接`/`抓鬼轮次计算-max`/`捉鬼-结束` 全 0 命中 | **副本链式假成功(导航节点无兜底)** | `fuben115.json` 是 6 副本线性链 + `[JumpBack]捉鬼-fuben桥接`：`50侠士①→70侠士→50侠士②→50普通-1→50普通-2→50普通-3→捉鬼桥接(2轮鬼)`，每个"完成-退出"后 next 到下个副本的导航。**导航节点(如 `115点击地图-百晓仙子-70普通-3`)next 只有 `[JumpBack]再次点击地图百晓仙子, 选择副本-X]`，无 `[JumpBack]panduan_zhujiemian` 回主界面兜底**。前副本退出时画面若没回长安城小地图(被师门/活动弹窗带偏)，小地图模板 + "选择副本"OCR 连续 miss → 20s 超时 → 该节点无 on_error → 全局空节点 → `PipelineNode.Succeeded` → **该副本及后续整链(含 2 轮鬼)全跳过**，编排层只看 job.done 报"完成"。07.30 实证：6 个"完成-退出"节点里前 5 个都 hit=1，第 6 个(50普通-3)卡在导航 on_error(17:42:35)，`捉鬼-fuben桥接` 0 命中。**判别**：fuben115 用时正常(~2000s) 不可信，须去 maafw 数 6 个"副本完成-退出"节点(`115-50侠士-`/`115-70级-`/`115-50普通-1/2/3-副本完成-退出`)是否全 hit + `捉鬼-fuben桥接` 是否 hit。**堵法**：①每个导航节点 next 末尾加 `[JumpBack]panduan_zhujiemian`(回主界面重开小地图，全项目通用兜底，CLAUDE.md 技巧1)；或②run_5r 加 sentinel 校验"6 副本完成-退出 + 捉鬼桥接"命中数 |
+| ⑬ | 副本 5 本里**后几本骤降到 30s 级**（506/541/362→**34/34**s）+ 捉鬼 31s；maafw `fuben69new-打开小地图-百晓仙子`/`打开小地图-钟馗` on_error；on_error 截图显示**小地图没打开**（角色长安城主界面、小地图面板关） | **副本连续进本 UI 时序假完成** | `打开小地图-百晓仙子` 是 DirectHit+ClickKey 61（小地图快捷键），action 报 success 但前一本刚结算退出、长安城界面未稳定 → 按键被吞 → 后续识别 NPC 20s 全 miss → 空节点假完成。前几本间隔够不受影响。**堵法（已实施 93badad）**：run_5r.team_run 每本前插 `_barrier_reset`（sleep5+打开大地图）让 UI 稳定 |
+| ⑭ | shimen 某号贴 2400s 超时；超时截图是**"装备上交"弹窗**（"您的'金缕羽衣'是价值较高的装备…输入验证码 2243"+数字键盘） | **师门高价值装备上交验证码弹窗未处理** | 上交高价值装备时游戏弹验证码确认，pipeline 无对应节点 → 卡死。**随机性**：仅上交高价值装备才触发。**堵法**：识别弹窗→OCR 验证码→输入→确认（或跳过高价值装备上交） |
+| ⑮ | 某号某任务超时后，**后续 N 个任务全 ~41s"完成"**（非 0s、非超时）；on_error 集中在那些后续任务的入口节点 | **前一任务卡死污染后续（连锁假成功）** | 前任务（如 wabaotu 卡"挖宝中"）超时后角色没回主界面；后续任务入口都先识别"主界面"，在错误界面 miss → 空节点 done=True（41s ≈ 2×20s next 超时）。判别：一串任务恒定 ~41s。**堵法（已实施 93badad/a3add01）**：①solo_all 每个 entry 前插 `_barrier_reset`；②run_task 加 `sentinel=_sentinel_main`（done 后校验主界面，假完成计失败） |
+| ⑯ | bangpai_renwu 全员 1500–2400s（远超 typical）；maafw 队长 `帮派任务单次的链`×46 + `战斗-等待20秒`×60；部分账号超时截图停**长安城"自动寻路中(藏宝图)"**（没进帮派） | **帮派战斗爆炸 + 寻路异常** | ①单次链未收敛/完成判断不灵，反复接-打-提交；②部分账号寻路目标异常（藏宝图而非帮派 NPC）。**堵法**：待定（查单次链完成判断、寻路目标） |
 
 ### 5.1 每轮"必触发"的 on_error（看到别慌，逐个对号）
 
