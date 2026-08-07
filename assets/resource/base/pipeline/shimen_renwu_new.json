@@ -113,6 +113,7 @@
             "[JumpBack]师门任务-任务分支-对话",
             "[JumpBack]师门任务-任务分支-兵器铺购买",
             "[JumpBack]任务分支-物品提交",
+            "[JumpBack]师门任务-任务分支-装备提交确认",
             "[JumpBack]任务分支-药店-购买",
             "[JumpBack]师门任务-任务分支-抄本",
             "[JumpBack]任务分支-摆摊购买",
@@ -137,6 +138,31 @@
     "师门-间隔3秒-最大10分钟": {
         "max_hit": 200,
         "pre_delay": 3000
+    },
+    "师门任务-任务分支-装备提交确认": {
+        "recognition": "OCR",
+        "expected": [
+            "装备上交"
+        ],
+        "roi": [
+            554,
+            9,
+            168,
+            76
+        ],
+        "next": [
+            "师门任务-任务分支-装备提交确认-输入验证码"
+        ]
+    },
+    "师门任务-任务分支-装备提交确认-输入验证码": {
+        "action": "Custom",
+        "custom_action": "fillCaptcha",
+        "custom_action_param": {
+            "ocr_roi": [649, 228, 121, 65],
+            "verify_roi": [458, 228, 117, 66],
+            "confirm_target": [730, 624, 85, 33],
+            "fallback_entry": "panduan_zhujiemian"
+        }
     },
     "师门任务-任务分支-兵器铺购买": {
         "recognition": "OCR",
