@@ -8,6 +8,7 @@
     "师门任务开始-v2": {
         "pre_delay": 200,
         "next": [
+            "[JumpBack]panduan_zhujiemian_ks",
             "师门-点击师门主任务-v2",
             "师门-点击师门子任务-v2",
             "[JumpBack]展开-首页任务栏",
