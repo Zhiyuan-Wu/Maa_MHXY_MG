@@ -378,6 +378,24 @@
             68
         ],
         "action": "Click",
+        "post_delay": 2500,
+        "next": [
+            "点击商会出售——满——出售-doublecheck",
+            "空节点"
+        ]
+    },
+    "点击商会出售——满——出售-doublecheck": {
+        "recognition": "OCR",
+        "expected": [
+            "出售"
+        ],
+        "roi": [
+            524,
+            529,
+            234,
+            68
+        ],
+        "action": "Click",
         "post_delay": 2500
     },
     "合成阵法": {
