@@ -81,18 +81,23 @@ if _IS_WINDOWS:
     # 弹出一个秒开秒关的控制台窗口并抢占前台。CREATE_NO_WINDOW 让所有子进程不创建新窗口
     # （也覆盖 MaaFw 内部 spawn 的 adb）。本地终端跑不受影响（父进程有控制台、子进程继承）。
     _sub_run, _sub_popen = subprocess.run, subprocess.Popen
+    _sub_popen_init = _sub_popen.__init__
     _CREATE_NO_WINDOW = 0x08000000
 
     def _sub_run_nw(args, *a, **kw):
         kw.setdefault("creationflags", _CREATE_NO_WINDOW)
         return _sub_run(args, *a, **kw)
 
-    def _sub_popen_nw(*a, **kw):
+    # 只原地包 Popen.__init__，**不要**把 subprocess.Popen 换成函数：asyncio/windows_utils.py
+    # 有 ``class Popen(subprocess.Popen)``，基类不是 type 会让 __build_class__ 回退用 function 当
+    # 元类 → "function() argument 'code' must be code, not str"（import custom→loguru→首次 import
+    # asyncio 时触发）。保持 Popen 原对象、只改 __init__ 默认值，子类化与 isinstance 全无感。
+    def _sub_popen_init_nw(self, args, *a, **kw):
         kw.setdefault("creationflags", _CREATE_NO_WINDOW)
-        return _sub_popen(*a, **kw)
+        return _sub_popen_init(self, args, *a, **kw)
+    _sub_popen.__init__ = _sub_popen_init_nw
 
     subprocess.run = _sub_run_nw
-    subprocess.Popen = _sub_popen_nw
 
 # native 崩溃（段错误 / abort / 访问违例）时，把出错线程的 Python 栈打到 stderr。
 # 用于定位"进程静默退出、无任何 traceback"的情况——多半是 C++ 侧（MaaFw/OCR 模型）
