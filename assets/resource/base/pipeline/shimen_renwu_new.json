@@ -109,12 +109,16 @@
     },
     "师门-进行中状态机-v2": {
         "next": [
+            "[JumpBack]师门完成-九转天阶遮挡",
+            "[JumpBack]师门完成-九幽遮挡",
+            "[JumpBack]战斗平衡弹窗-点击关闭",
+            "[JumpBack]关闭X9联赛弹窗",
             "师门完成确定-图片识别-v2",
             "师门完成确定-文字识别-v2",
             "[JumpBack]师门任务-任务分支-对话",
             "[JumpBack]师门任务-任务分支-兵器铺购买",
-            "[JumpBack]任务分支-物品提交",
             "[JumpBack]师门任务-任务分支-装备提交确认",
+            "[JumpBack]任务分支-物品提交",
             "[JumpBack]任务分支-药店-购买",
             "[JumpBack]师门任务-任务分支-抄本",
             "[JumpBack]任务分支-摆摊购买",
@@ -122,10 +126,6 @@
             "[JumpBack]清理主界面使用-关闭",
             "[JumpBack]战斗中-等待10秒",
             "[JumpBack]师门任务-单次点击-v2",
-            "[JumpBack]师门完成-九转天阶遮挡",
-            "[JumpBack]师门完成-九幽遮挡",
-            "[JumpBack]战斗平衡弹窗-点击关闭",
-            "[JumpBack]关闭X9联赛弹窗",
             "[JumpBack]跳过剧情动画-快进键",
             "[JumpBack]关闭三界热点",
             "[JumpBack]师门-间隔3秒-最大10分钟",
@@ -159,9 +159,24 @@
         "action": "Custom",
         "custom_action": "fillCaptcha",
         "custom_action_param": {
-            "ocr_roi": [649, 228, 121, 65],
-            "verify_roi": [458, 228, 117, 66],
-            "confirm_target": [730, 624, 85, 33],
+            "ocr_roi": [
+                649,
+                228,
+                121,
+                65
+            ],
+            "verify_roi": [
+                458,
+                228,
+                117,
+                66
+            ],
+            "confirm_target": [
+                730,
+                624,
+                85,
+                33
+            ],
             "fallback_entry": "panduan_zhujiemian"
         }
     },
@@ -233,7 +248,6 @@
         "recognition": "OCR",
         "expected": [
             "孔雀石",
-            "6",
             "30级",
             "10个",
             "百炼精铁"
