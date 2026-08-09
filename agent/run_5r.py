@@ -54,6 +54,7 @@ import faulthandler
 import gc
 import json
 import os
+import select
 import socket
 import subprocess
 import sys
@@ -501,7 +502,7 @@ def _launch_one(idx, package, retries=2):
     raise RuntimeError(f"MuMu 实例 {idx} launch 失败（重试 {retries} 次仍未起）：{last_err}")
 
 
-def ensure_instances(indices, package=PACKAGE, retries=2, cool_down=10, boot_come_up=180):
+def ensure_instances(indices, package=PACKAGE, retries=2, cool_down=10, boot_come_up=180, cancel=None):
     """确保每个 MuMu 实例的模拟器已启动、adb 可用（**交付界面：adb ready**）。
 
     两阶段：
@@ -512,6 +513,10 @@ def ensure_instances(indices, package=PACKAGE, retries=2, cool_down=10, boot_com
 
     崩溃 / 冷启动闪退**隐含**在 double-check 失败里——adb 不可用即重拉，无需状态跟踪。
     幂等。返回 ``{index: addr}``。
+
+    ``cancel``（threading.Event / callable / None）：mumu_server HTTP handler 在客户端断连时传入，
+    本函数在每个错峰/冷却/轮询点探测；命中即打印并 **提前 return（不 raise）**——已 launch 的实例
+    保留（不回滚），只是不再继续替一个已经走掉的请求方 launch/retry 剩余实例。
     """
     indices = sorted(set(int(i) for i in indices))
     adb = _adb_path()
@@ -521,8 +526,12 @@ def ensure_instances(indices, package=PACKAGE, retries=2, cool_down=10, boot_com
     info = mumu_info(",".join(map(str, indices)))
     to_launch = [i for i in indices if not info.get(str(i), {}).get("is_process_started")]
     for k, i in enumerate(to_launch):
-        if k > 0:
-            time.sleep(LAUNCH_STAGGER)  # 相邻实例启动间隔 ≥LAUNCH_STAGGER 秒，避免 5 个模拟器同时拉起压满宿主
+        if _cancelled(cancel):
+            print(">>> ensure_instances：HTTP 客户端已断连，中止（已 launch 的实例保留）")
+            return {}
+        if k > 0 and _sleep_cancel(LAUNCH_STAGGER, cancel):  # 相邻实例启动间隔 ≥LAUNCH_STAGGER 秒，避免 5 个模拟器同时拉起压满宿主
+            print(">>> ensure_instances：错峰等待期间客户端断连，中止")
+            return {}
         print(f">>> 启动 MuMu 实例 {i}（control launch -pkg {package}）")
         _launch_one(i, package)
 
@@ -530,13 +539,18 @@ def ensure_instances(indices, package=PACKAGE, retries=2, cool_down=10, boot_com
     print(f">>> 逐台双重检查 adb 可用（cool_down={cool_down}s, boot_come_up={boot_come_up}s）")
     failed = []
     for i in indices:
+        if _cancelled(cancel):
+            print(">>> ensure_instances：HTTP 客户端已断连，中止")
+            return {}
         addr = _idx_to_addr(i)
         t0 = time.time()
         for attempt in range(retries + 1):
-            if _double_check(lambda a=addr: _adb_ready(adb, a), cool_down, boot_come_up):
+            if _double_check(lambda a=addr: _adb_ready(adb, a), cool_down, boot_come_up, cancel=cancel):
                 print(f"    实例 {i}({addr}) adb 就绪（双重检查通过，用时 {int(time.time() - t0)}s）")
                 break
             if attempt < retries:
+                if _cancelled(cancel):
+                    return {}
                 print(f"    实例 {i}({addr}) adb 双重检查未过，重拉模拟器（{attempt + 1}/{retries}）")
                 _launch_one(i, package)
         else:
@@ -679,26 +693,56 @@ def _adb_ready(adb, address, timeout=8):
     return cp.returncode == 0 and cp.stdout.strip() == "1"
 
 
-def _wait_for(check, timeout, interval=2):
-    """轮询 ``check()`` 直到返回真或 ``timeout`` 到期。命中返回 True，超时返回 False。"""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if check():
-            return True
-        time.sleep(interval)
+def _cancelled(cancel):
+    """``cancel`` 为 None / threading.Event / callable → 是否已请求取消。
+
+    供 ensure_instances / ensure_process 等长流程在轮询、错峰、冷却点探测；mumu_server 的 HTTP
+    handler 在客户端断连时 set 一个 Event 传入，使正在替远端执行的 ensure 能尽快中止，避免
+    "客户端已 cancel、mumu_server 仍继续 launch/retry"的鬼魂 ensure。"""
+    if cancel is None:
+        return False
+    if hasattr(cancel, "is_set"):
+        return cancel.is_set()
+    if callable(cancel):
+        return bool(cancel())
     return False
 
 
-def _double_check(check, cool_down=10, come_up=60):
+def _sleep_cancel(seconds, cancel, step=1.0):
+    """可被 ``cancel`` 中断的 sleep。返回 True=中途被取消、False=睡满。step 控制取消响应粒度。"""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if _cancelled(cancel):
+            return True
+        time.sleep(min(step, max(0.0, deadline - time.time())))
+    return _cancelled(cancel)
+
+
+def _wait_for(check, timeout, interval=2, cancel=None):
+    """轮询 ``check()`` 直到返回真或 ``timeout`` 到期。命中返回 True，超时/取消返回 False。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _cancelled(cancel):
+            return False
+        if check():
+            return True
+        if _sleep_cancel(interval, cancel):
+            return False
+    return False
+
+
+def _double_check(check, cool_down=10, come_up=60, cancel=None):
     """双重检查（ensure_instances / ensure_process 共用）。
 
     检查①：``_wait_for(check, come_up)``——轮询直到命中（容忍模拟器/游戏慢启动）；
     冷却 ``cool_down`` 秒；检查②：再 ``check()`` 一次——抓"起来又崩 / 闪退"。
     两次都过才返回 True。崩 / 闪退 / 起不来都隐含在此：检查不过 → 上层重拉。
+    ``cancel`` 透传给 _wait_for / 冷却 sleep，客户端断连即提前返回 False。
     """
-    if not _wait_for(check, come_up):
+    if not _wait_for(check, come_up, cancel=cancel):
         return False
-    time.sleep(cool_down)
+    if _sleep_cancel(cool_down, cancel):
+        return False
     return check()
 
 
@@ -722,7 +766,7 @@ def _idx_to_addr(idx):
     return f"127.0.0.1:{16384 + 32 * idx}"
 
 
-def ensure_process(addresses, package=PACKAGE, retries=2, cool_down=10, come_up=40):
+def ensure_process(addresses, package=PACKAGE, retries=2, cool_down=10, come_up=40, cancel=None):
     """在每个地址上确保游戏进程已启动（**交付界面：游戏进程存活**，建立在 ensure_instances 之上）。
 
     每个地址：不在则 ``monkey`` 拉起 → 双重检查（检查①轮询到 pidof 命中 ≤``come_up`` →
@@ -730,21 +774,28 @@ def ensure_process(addresses, package=PACKAGE, retries=2, cool_down=10, come_up=
 
     背景：实测 ``control launch -pkg`` 在本环境**不能可靠起游戏**（120s 未起），monkey 才是可靠
     手段（~2s）。闪退隐含在 double-check 失败 → 重新 monkey。
+
+    ``cancel``：mumu_server HTTP handler 客户端断连时传入，命中即提前 return（与 ensure_instances 同语义）。
     """
     adb = _adb_path()
     _adb_reset(adb, addresses)
     print(f">>> 逐台双重检查游戏进程（cool_down={cool_down}s, come_up={come_up}s）")
     failed = []
     for addr in addresses:
+        if _cancelled(cancel):
+            print(">>> ensure_process：HTTP 客户端已断连，中止")
+            return
         t0 = time.time()
         for attempt in range(retries + 1):
             if not _game_process_alive(adb, addr, package):
                 print(f"    [{addr}] 游戏进程不存在，monkey 拉起")
                 _start_game_process(adb, addr, package)
-            if _double_check(lambda a=addr: _game_process_alive(adb, a, package), cool_down, come_up):
+            if _double_check(lambda a=addr: _game_process_alive(adb, a, package), cool_down, come_up, cancel=cancel):
                 print(f"    [{addr}] 游戏进程就绪（双重检查通过，用时 {int(time.time() - t0)}s）")
                 break
             if attempt < retries:
+                if _cancelled(cancel):
+                    return
                 print(f"    [{addr}] 游戏进程双重检查未过，重新 monkey（{attempt + 1}/{retries}）")
         else:
             failed.append(addr)
@@ -1938,8 +1989,46 @@ def _stop_dedicated_adb():
         pass
 
 
+def _client_gone_watcher(conn, cancel, poll=2.0):
+    """后台线程：HTTP 客户端断连即 set(cancel)。``conn`` 为 handler 的 ``self.connection``。
+
+    用 select 监听连接可读事件——客户端在等响应期间不发数据，故"可读"只意味着对端 orderly
+    close（recv 返回 ``b""``）或连接被重置（抛 ConnectionResetError/BrokenPipeError），两者都判
+    定为断连。``mumu_server`` 的 ensure_instances/ensure_process 是长阻塞且不感知客户端断开
+    （ThreadingHTTPServer 每请求一线程、远端 cancel 只杀 Mac 子进程不断 mumu_server 的连接上下文），
+    若不在客户端断开后中止，会留下"鬼魂 ensure"继续 launch/retry 实例。"""
+    try:
+        while not cancel.is_set():
+            r, _, _ = select.select([conn], [], [], poll)
+            if not r:
+                continue
+            try:
+                data = conn.recv(1, socket.MSG_PEEK)
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                cancel.set(); return
+            if data == b"":           # 对端 orderly close（FIN）
+                cancel.set(); return
+            # 非空 = 客户端又发了字节（keep-alive 下一请求等），不算断连，继续监听
+    except Exception:
+        pass
+
+
 class _MuMuHandler(BaseHTTPRequestHandler):
     log_message = _log_message_silent
+
+    def _guarded(self, func):
+        """在"客户端断连即取消"保护下运行 ``func(cancel)``，返回其返回值。
+
+        起一个 daemon watcher 监听本连接，客户端断开即 set(cancel)；``func``（如
+        ``ensure_instances``/``ensure_process``）在长循环里据此尽早返回。finally 里 set(cancel)
+        让 watcher 退出，不留线程。仅用于长阻塞端点（/instance/ensure、/process/ensure）。"""
+        cancel = threading.Event()
+        t = threading.Thread(target=_client_gone_watcher, args=(self.connection, cancel), daemon=True)
+        t.start()
+        try:
+            return func(cancel)
+        finally:
+            cancel.set()
 
     def do_GET(self):
         if not _auth_ok(self):
@@ -2001,10 +2090,10 @@ class _MuMuHandler(BaseHTTPRequestHandler):
                 _send_json(self, {"ok": ok})
             elif path == "/instance/ensure":
                 indices = sorted(set(int(i) for i in body["indices"]))
-                ensure_instances(indices, package=body.get("package", PACKAGE))
+                self._guarded(lambda c: ensure_instances(indices, package=body.get("package", PACKAGE), cancel=c))
                 _send_json(self, {"ok": True, "ready": indices})
             elif path == "/process/ensure":
-                ensure_process(list(body["addresses"]), package=body.get("package", PACKAGE))
+                self._guarded(lambda c: ensure_process(list(body["addresses"]), package=body.get("package", PACKAGE), cancel=c))
                 _send_json(self, {"ok": True})
             elif path == "/adb/connect":
                 # 用专用 server 端口 connect（不走默认 5037）：把 address 注册进 5038 的设备表。
