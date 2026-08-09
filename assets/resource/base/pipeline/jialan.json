@@ -1,0 +1,281 @@
+{
+    "jialan": {
+        "next": [
+            "jialan-识别主界面-过渡",
+            "[JumpBack]panduan_zhujiemian"
+        ]
+    },
+    "jialan-识别主界面-过渡": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/chenghao.png",
+            "zonghe/jiahao.png"
+        ],
+        "roi": [
+            1206,
+            637,
+            66,
+            57
+        ],
+        "post_delay": 3000,
+        "next": [
+            "jialan-打开大地图"
+        ]
+    },
+    "jialan-打开大地图": {
+        "focus": {
+            "Node.Action.Succeeded": "jialan 按键打开大地图"
+        },
+        "pre_delay": 500,
+        "action": "ClickKey",
+        "key": [
+            57,
+            41
+        ],
+        "post_delay": 1000,
+        "next": [
+            "jialan-打开大地图成功-传送两界山",
+            "[JumpBack]panduan_zhujiemian_ks",
+            "[JumpBack]大地图界面-按键打开失败_点击图标"
+        ]
+    },
+    "jialan-打开大地图成功-传送两界山": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/ditu_jiemian_panduan.png",
+            "zonghe/ditu_jiemian_panduan2.png"
+        ],
+        "roi": [
+            111,
+            32,
+            83,
+            79
+        ],
+        "next": [
+            "jialan-传送两界山"
+        ]
+    },
+    "jialan-传送两界山": {
+        "focus": {
+            "Node.Action.Succeeded": "jialan 点击两界山tab传送"
+        },
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/tab_liangjieshan1.png",
+            "zonghe/tab_liangjieshan2.png"
+        ],
+        "order_by": "Score",
+        "pre_delay": 1000,
+        "action": "Click",
+        "post_delay": 1000,
+        "next": [
+            "jialan-识别位置-两界山-过渡"
+        ]
+    },
+    "jialan-识别位置-两界山-过渡": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/chenghao.png",
+            "zonghe/jiahao.png"
+        ],
+        "roi": [
+            1206,
+            637,
+            66,
+            57
+        ],
+        "post_delay": 3000,
+        "next": [
+            "jialan-识别位置-两界山",
+            "[JumpBack]panduan_zhujiemian_ks"
+        ]
+    },
+    "jialan-识别位置-两界山": {
+        "focus": {
+            "Node.Recognition.Succeeded": "jialan 已到达两界山"
+        },
+        "recognition": "OCR",
+        "expected": [
+            "两界"
+        ],
+        "roi": [
+            108,
+            22,
+            117,
+            31
+        ],
+        "post_delay": 3000,
+        "next": [
+            "jialan-打开小地图-两界山"
+        ]
+    },
+    "jialan-打开小地图-两界山": {
+        "pre_delay": 1000,
+        "action": "ClickKey",
+        "key": [
+            61
+        ],
+        "post_delay": 1000,
+        "next": [
+            "jialan-点击连接NPC-转移到新地区",
+            "[JumpBack]小地图-按键打开失败-点击小地图图标"
+        ]
+    },
+    "jialan-点击连接NPC-转移到新地区": {
+        "focus": {
+            "Node.Action.Succeeded": "jialan 点击连接NPC转移新地区"
+        },
+        "recognition": "OCR",
+        "expected": [
+            "云岚",
+            "浮岛"
+        ],
+        "roi": [
+            527,
+            179,
+            119,
+            61
+        ],
+        "action": "Click",
+        "post_delay": 5000,
+        "next": [
+            "jialan-识别位置-新地区-过渡"
+        ]
+    },
+    "jialan-识别位置-新地区-过渡": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/chenghao.png",
+            "zonghe/jiahao.png"
+        ],
+        "roi": [
+            1206,
+            637,
+            66,
+            57
+        ],
+        "post_delay": 3000,
+        "next": [
+            "jialan-识别位置-新地区",
+            "[JumpBack]panduan_zhujiemian_ks"
+        ]
+    },
+    "jialan-识别位置-新地区": {
+        "focus": {
+            "Node.Recognition.Succeeded": "jialan 已到达新地区"
+        },
+        "recognition": "OCR",
+        "expected": [
+            "云岚",
+            "浮岛"
+        ],
+        "roi": [
+            108,
+            22,
+            117,
+            31
+        ],
+        "post_delay": 3000,
+        "next": [
+            "jialan-打开小地图-新地区"
+        ]
+    },
+    "jialan-打开小地图-新地区": {
+        "pre_delay": 1000,
+        "action": "ClickKey",
+        "key": [
+            61
+        ],
+        "post_delay": 1000,
+        "next": [
+            "jialan-点击地图-伽蓝",
+            "[JumpBack]jialan-点击地图-打开npc列表",
+            "[JumpBack]小地图-按键打开失败-点击小地图图标"
+        ]
+    },
+    "jialan-点击地图-打开npc列表": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/npc_list.png"
+        ],
+        "roi": [
+            322,
+            35,
+            137,
+            128
+        ],
+        "action": "Click"
+    },
+    "jialan-点击地图-伽蓝": {
+        "focus": {
+            "Node.Action.Succeeded": "jialan 点击伽蓝"
+        },
+        "recognition": "OCR",
+        "expected": [
+            "伽蓝",
+            "伽",
+            "蓝"
+        ],
+        "roi": [
+            370,
+            136,
+            235,
+            229
+        ],
+        "action": "Click",
+        "post_delay": 2000,
+        "next": [
+            "jialan-对话"
+        ]
+    },
+    "jialan-对话": {
+        "recognition": "OCR",
+        "expected": [
+            "请选择要做的事"
+        ],
+        "roi": [
+            876,
+            5,
+            311,
+            544
+        ],
+        "next": [
+            "jialan-选择聊天"
+        ]
+    },
+    "jialan-选择聊天": {
+        "recognition": "OCR",
+        "expected": [
+            "聊天"
+        ],
+        "roi": [
+            876,
+            5,
+            311,
+            544
+        ],
+        "action": "Click",
+        "post_delay": 500,
+        "next": [
+            "jialan-选择聊天2"
+        ]
+    },
+    "jialan-选择聊天2": {
+        "recognition": "OCR",
+        "expected": [
+            "关于"
+        ],
+        "roi": [
+            876,
+            5,
+            311,
+            544
+        ],
+        "action": "Click",
+        "pre_delay": 2000,
+        "next": [
+            "[JumpBack]跳过剧情动画-快进键",
+            "panduan_zhujiemian"
+        ]
+    }
+}
