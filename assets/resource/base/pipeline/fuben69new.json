@@ -373,6 +373,7 @@
             "fuben69new-副本完成-退出",
             "[JumpBack]点击副本-跳过剧情动画",
             "[JumpBack]战斗中-等待10秒",
+            "[JumpBack]funben-战斗失败",
             "[JumpBack]点击副本-开始战斗",
             "[JumpBack]副本-战斗-对话",
             "[JumpBack]跳过剧情动画-快进键",
@@ -380,6 +381,16 @@
             "[JumpBack]关闭福利弹窗",
             "[JumpBack]关闭师门弹窗",
             "[JumpBack]fuben69new-间隔2秒-节流"
+        ]
+    },
+    "funben-战斗失败": {
+        "max_hit": 5,
+        "recognition": "TemplateMatch",
+        "template": [
+            "fuben/zhandou_shibai.png"
+        ],
+        "next": [
+            "panduan_zhujiemian"
         ]
     },
     "fuben69new-间隔2秒-节流": {
@@ -406,21 +417,6 @@
         "next": [
             "panduan_zhujiemian",
             "[JumpBack]fuben69new-打开大地图"
-        ]
-    },
-    "fuben69new-测试-普通-1": {
-        "next": [
-            "fuben69new-副本完成-退出",
-            "[JumpBack]点击副本-跳过剧情动画",
-            "[JumpBack]战斗中-等待10秒",
-            "[JumpBack]点击副本-开始战斗",
-            "[JumpBack]副本-战斗-对话",
-            "[JumpBack]跳过剧情动画-快进键",
-            "[JumpBack]推荐好友信息",
-            "[JumpBack]关闭福利弹窗",
-            "[JumpBack]关闭师门弹窗",
-            "[JumpBack]fuben69new-间隔2秒-节流",
-            "panduan_zhujiemian"
         ]
     }
 }
