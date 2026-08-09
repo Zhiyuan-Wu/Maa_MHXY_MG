@@ -89,6 +89,11 @@
     ],
     "task": [
         {
+            "name": "jialan",
+            "entry": "jialan",
+            "description": "jialan"
+        },
+        {
             "name": "帮派任务",
             "entry": "bangpai_renwu",
             "description": "帮派任务"
