@@ -34,13 +34,20 @@ PACKAGE = "com.netease.my"
 
 # 组队副本 = 5 本 fuben69new 串联（每本一个 entry，override 选目标）+ ZHUOGUI_ROUNDS 轮捉鬼。
 # (是否侠士, 第几个)：侠士 idx∈{1,2}=50侠士/70侠士；普通 idx∈{1,2,3}=50普通-1/2、70普通。
-FUBEN69NEW_PLAN = [
-    (True, 1),   # 50侠士
-    (True, 2),   # 70侠士
-    (False, 1),  # 50普通-1
-    (False, 2),  # 50普通-2
-    (False, 3),  # 70普通
-]
+if datetime.now().weekday() == 0: # 小号侠士不稳定，只周一打
+    FUBEN69NEW_PLAN = [
+        (True, 1),   # 50侠士
+        (True, 2),   # 70侠士
+        (False, 1),  # 50普通-1
+        (False, 2),  # 50普通-2
+        (False, 3),  # 70普通
+    ]
+else:
+    FUBEN69NEW_PLAN = [
+        (False, 1),  # 50普通-1
+        (False, 2),  # 50普通-2
+        (False, 3),  # 70普通
+    ]
 # 副本完成、桥接捉鬼后跑几轮鬼。注意 **实际轮数 = max_hit + 1**（详见 run_5r.py 注释）。
 ZHUOGUI_ROUNDS = 2
 
@@ -68,7 +75,7 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
 SOLO_ENTRIES = ["shuangbei", "huoli", "fuli_qiandao", "shimen_renwu_new", "yunbiao_renwu2",
                 "baotu_renwu", "wabaotu_qingli",
                 "mijing_renwu", "sanjieqiyuan", "huoyue_lingqu",
-                "zhengli_baibao", "jiayuan_zhengli", "huoli", "zhanghao_xinxi"]
+                "zhengli_baibao", "jiayuan_zhengli", "zhanghao_xinxi"]
 if datetime.now().weekday() == 3:   # 周四
     SOLO_ENTRIES.insert(0, "bangpai_renwu")
 if datetime.now().weekday() < 5:    # 工作日
