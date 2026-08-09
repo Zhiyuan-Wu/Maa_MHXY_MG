@@ -52,7 +52,8 @@
                 "recognition": "TemplateMatch",
                 "template": [
                     "zonghe/huodong1.png",
-                    "zonghe/huodong2.png"
+                    "zonghe/huodong2.png",
+                    "zonghe/huodong3.png"
                 ],
                 "roi": [
                     316,
@@ -60,15 +61,12 @@
                     79,
                     78
                 ],
-                "threshold": [
-                    0.9
-                ]
+                "threshold": 0.7
             },
             {
                 "recognition": "OCR",
                 "expected": [
-                    "活动",
-                    "舌动"
+                    "动"
                 ],
                 "roi": [
                     316,
