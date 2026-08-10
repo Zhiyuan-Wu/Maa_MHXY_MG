@@ -34,20 +34,14 @@ PACKAGE = "com.netease.my"
 
 # 组队副本 = 5 本 fuben69new 串联（每本一个 entry，override 选目标）+ ZHUOGUI_ROUNDS 轮捉鬼。
 # (是否侠士, 第几个)：侠士 idx∈{1,2}=50侠士/70侠士；普通 idx∈{1,2,3}=50普通-1/2、70普通。
-if datetime.now().weekday() == 0: # 小号侠士不稳定，只周一打
-    FUBEN69NEW_PLAN = [
-        (True, 1),   # 50侠士
-        (True, 2),   # 70侠士
-        (False, 1),  # 50普通-1
-        (False, 2),  # 50普通-2
-        (False, 3),  # 70普通
-    ]
-else:
-    FUBEN69NEW_PLAN = [
-        (False, 1),  # 50普通-1
-        (False, 2),  # 50普通-2
-        (False, 3),  # 70普通
-    ]
+FUBEN69NEW_PLAN = [
+    (True, 1),   # 50侠士
+    (True, 2),   # 70侠士
+    (False, 1),  # 50普通-1
+    (False, 2),  # 50普通-2
+    (False, 3),  # 70普通
+]
+
 # 副本完成、桥接捉鬼后跑几轮鬼。注意 **实际轮数 = max_hit + 1**（详见 run_5r.py 注释）。
 ZHUOGUI_ROUNDS = 2
 

@@ -311,9 +311,9 @@ DEFAULT_OVERRIDES = globals().get("DEFAULT_OVERRIDES") or {
         "使用秘境材料": {"enabled": True}, "使用过期物品": {"enabled": True},
         "出售百炼精铁": {"enabled": True}, "出售制造书": {"enabled": True},
     },
-    "jiayuan_zhengli": {
-        "点击管家寻路": {"next": ["卧室-点击打理", "[JumpBack]panduan_zhujiemian"]},
-    },
+    # "jiayuan_zhengli": {
+    #     "点击管家寻路": {"next": ["卧室-点击打理", "[JumpBack]panduan_zhujiemian"]},
+    # },
 }
 if KEJU_AI.get("apikey") and "kejuxiangshi" not in DEFAULT_OVERRIDES:
     # AIAnswer 从节点 attach 读 apikey/url/model，三项缺一不可；url 要带 /v1/chat/completions。
