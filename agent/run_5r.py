@@ -1157,13 +1157,21 @@ def launch(tasker, package=PACKAGE, timeout=240, address=None):
     return False
 
 
-def _reconnect_tasker(old_tasker, address):
-    """实例重启后重建 tasker：**复用旧 Resource**（OCR 模型不重载、不占额外内存——5 开内存紧张时
-    关键），只新建 Controller 连到重启后的实例 + 新 Tasker。
+def _reconnect_tasker(address):
+    """实例重启后重建 tasker：**新建独立 Resource**（全新三元组 = 新 Resource + 新 Controller +
+    新 Tasker，与冷启动 ``connect_devices`` 一致）。
 
-    为什么需要：实例重启后旧 tasker 的 runner 会失效（``task_id_to_runner_id runner id not found``，
-    run_task 跑不了）；但 Resource（pipeline JSON + OCR 模型）与实例无关、可复用。复用而非重建省
-    ~0.1GB/号的 OCR 模型内存 + 几秒加载。**不做 kill-server**（会扰动并发的其它账号）。
+    ⚠ **历史设计曾"复用旧 Resource"省内存，已于 2026-08-10 废弃**：复用会让 L3 后的新 tasker 与
+    残留旧 tasker 共享同一 Resource 的 OCR 模型；team_form 阶段多 Tasker 并发 post_task 时触发
+    原生 access violation（Mac=SIGBUS exit -10 / Win=SIGSEGV exit 139）——2026-08-10 job 155003
+    邀请晚风即此症（faulthandler 栈死在 ``maa.tasker.post_task``），本地最小复现见
+    ``tools/_repro_l3_resource_race.py``（共享 Resource 必崩、独立 Resource 存活）。根因同
+    Resource 的 OCR/pipeline 上下文**非线程安全**：多 Tasker 共享一份 Resource 并发进 native 识别
+    路径必崩。故 L3 必须新建独立 Resource，彻底切断新旧 tasker 的 resource 共享。
+
+    代价 ~0.1GB/号 OCR 模型内存 + ~2s 加载——L3 是偶发恢复路径（实例级重启已释放该实例 ~3-4GB），
+    完全可接受。**不做 kill-server**（会扰动并发的其它账号）。旧 tasker 的释放由调用方
+    ``_launch_account`` 在 L3 前显式 post_stop（见该函数）。
     """
     Toolkit.init_option(DEBUG_DIR)
     found = {d.address: d for d in (_adb_find_devices())}
@@ -1175,8 +1183,11 @@ def _reconnect_tasker(old_tasker, address):
                          screencap_methods=dev.screencap_methods, input_methods=dev.input_methods,
                          config=dev.config)
     ctrl.post_connection().wait()
+    resource = Resource()                       # 新建独立 Resource（不再 bind old_tasker.resource）
+    resource.post_bundle(RESOURCE_PATH).wait()
+    _register_customs(resource)
     t = Tasker()
-    t.bind(old_tasker.resource, ctrl)   # 复用旧 Resource（OCR 模型不重载）
+    t.bind(resource, ctrl)
     if not t.inited:
         print(f"    [{address}] 重连后 tasker 未就绪")
         return None
@@ -1185,14 +1196,15 @@ def _reconnect_tasker(old_tasker, address):
 
 def _launch_account(tasker, role, address, package=PACKAGE, timeout=240):
     """单账号完整启动阶梯：``launch`` 失败（start 没把游戏带到主界面）→ 直接升级 L3（实例级重启
-    + 复用 Resource 重连 tasker + 重试 launch）。返回 ``(是否就绪, L3 后的新 tasker 或 None)``。
+    + 新建独立 Resource 重连 tasker + 重试 launch）。返回 ``(是否就绪, L3 后的新 tasker 或 None)``。
 
     为什么没有 L1：实测 L1（force-stop+monkey 重启游戏）在**脏实例**上必败——游戏重启后卡
     ProtocolLauncher / 停在后台 Android 主界面，MaaFw 取不到 display id，start 白跑满超时（~150s）
     才升级。L3 实例级重启给干净 Android 启动，start 才能正常把游戏带到主界面（多轮实测）。L3
     严格优于 L1，故砍掉 L1，失败即 L3，机制精简且更快（省 L1 那 150s）。
 
-    内存安全：L3 复用旧 Resource（OCR 模型不重载）；shutdown 实例时还释放该实例 ~3-4GB 再重分配。
+    内存安全：L3 **新建独立 Resource**（不复用旧 Resource——多 Tasker 共享会触发并发 native 崩，
+    见 ``_reconnect_tasker``）；shutdown 实例时还释放该实例 ~3-4GB 再重分配，远覆盖 ~0.1GB 新 resource。
     """
     try:
         if launch(tasker, package, timeout, address):
@@ -1200,11 +1212,19 @@ def _launch_account(tasker, role, address, package=PACKAGE, timeout=240):
     except Exception as e:
         print(f"!!! [{role}] launch 异常：{e}")
     print(f"!!! [{role}] launch 未就绪，升级 L3 实例级重启 + 重连 tasker")
+    # 方案2：L3 前 显式停止旧 tasker。其 controller 将随实例重启失效，故 post_stop **不 wait**
+    # （避免在失效 native handle 上阻塞或二次崩），仅发停止信号；try/except 兜底 native 异常。
+    # 旧 tasker 的 Resource 已在 _reconnect_tasker 里弃用（改新建独立 Resource），不与新 tasker
+    # 共享；这里 post_stop 纯为释放旧 tasker 自身 native 状态、防止残留。
+    try:
+        tasker.post_stop()
+    except Exception:
+        pass
     adb = _adb_for_mode()   # remote 下 _restart_instance 走 HTTP（Win 端跑），adb 仅备用
     idx = (int(address.rsplit(":", 1)[1]) - 16384) // 32   # MuMu 约定 adb_port = 16384 + 32*idx
     if not be_restart_instance(adb, address, idx, package):
         return False, None
-    new_t = _reconnect_tasker(tasker, address)
+    new_t = _reconnect_tasker(address)
     if new_t is None:
         print(f"!!! [{role}] L3 后重连 tasker 失败")
         return False, None
