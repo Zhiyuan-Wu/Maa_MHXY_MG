@@ -70,7 +70,7 @@ SOLO_ENTRIES = ["shuangbei", "huoli", "fuli_qiandao", "shimen_renwu_new", "yunbi
                 "baotu_renwu", "wabaotu_qingli",
                 "mijing_renwu", "sanjieqiyuan", "huoyue_lingqu",
                 "zhengli_baibao", "jiayuan_zhengli", "zhanghao_xinxi", "jialan"]
-if datetime.now().weekday() == 3:   # 周四
+if datetime.now().weekday() == 2:
     SOLO_ENTRIES.insert(0, "bangpai_renwu")
 if datetime.now().weekday() < 5:    # 工作日
     SOLO_ENTRIES.insert(0, "kejuxiangshi")
