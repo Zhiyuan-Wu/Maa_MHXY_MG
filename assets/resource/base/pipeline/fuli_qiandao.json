@@ -6,17 +6,33 @@
         ]
     },
     "fuli_qiandao-ocr": {
-        "recognition": "OCR",
-        "expected": [
-            "福利"
+        "recognition": "Or",
+        "any_of": [
+            {
+                "recognition": "OCR",
+                "expected": [
+                    "福利"
+                ],
+                "roi": [
+                    1,
+                    112,
+                    72,
+                    65
+                ]
+            },
+            {
+                "recognition": "TemplateMatch",
+                "template": [
+                    "zonghe/fuli_anniu.png"
+                ],
+                "roi": [
+                    3,
+                    86,
+                    91,
+                    105
+                ]
+            }
         ],
-        "roi": [
-            1,
-            112,
-            72,
-            65
-        ],
-        "pre_wait_freezes": 1,
         "action": "ClickKey",
         "key": [
             57,
@@ -25,7 +41,8 @@
         "post_delay": 1000,
         "next": [
             "dakaiguaguale",
-            "[JumpBack]福利界面-按键失败-点击福利图标"
+            "[JumpBack]福利界面-按键失败-点击福利图标",
+            "[JumpBack]福利界面-按键失败-点击福利图标2"
         ]
     },
     "福利界面-按键失败-点击福利图标": {
@@ -38,6 +55,21 @@
             112,
             72,
             65
+        ],
+        "pre_delay": 500,
+        "action": "Click",
+        "post_delay": 1000
+    },
+    "福利界面-按键失败-点击福利图标2": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/fuli_anniu.png"
+        ],
+        "roi": [
+            3,
+            86,
+            91,
+            105
         ],
         "pre_delay": 500,
         "action": "Click",
