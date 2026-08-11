@@ -2,9 +2,9 @@
     "jiayuan_zhengli": {
         "next": [
             "回到家园-成功",
+            "[JumpBack]点击家园",
             "[JumpBack]panduan_zhujiemian_ks",
-            "[JumpBack]家园-主界面-加号",
-            "[JumpBack]点击家园"
+            "[JumpBack]家园-主界面-加号"
         ]
     },
     "家园-主界面-加号": {
@@ -25,10 +25,10 @@
         "recognition": "TemplateMatch",
         "template": "jiayuan/jiayuan.png",
         "roi": [
-            977,
-            640,
-            60,
-            46
+            834,
+            608,
+            353,
+            104
         ],
         "pre_delay": 1000,
         "pre_wait_freezes": 1,
@@ -47,10 +47,10 @@
         "recognition": "TemplateMatch",
         "template": "jiayuan/jiayuan.png",
         "roi": [
-            977,
-            640,
-            60,
-            46
+            834,
+            608,
+            353,
+            104
         ],
         "pre_delay": 500,
         "action": "Click",
