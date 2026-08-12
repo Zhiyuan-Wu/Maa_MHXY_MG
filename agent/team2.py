@@ -73,7 +73,9 @@ SOLO_ENTRIES = ["shuangbei", "huoli", "fuli_qiandao", "shimen_renwu_new", "yunbi
 if datetime.now().weekday() == 2:
     SOLO_ENTRIES.insert(0, "bangpai_renwu")
 if datetime.now().weekday() < 5:    # 工作日
-    SOLO_ENTRIES.insert(0, "kejuxiangshi")
+    # SOLO_ENTRIES.insert(0, "kejuxiangshi")
+    SOLO_ENTRIES.append("kejuxiangshi")
+    
 
 # 科举乡试 AI 答题凭证（deepseek，openai 兼容端点）。apikey 从 .env 的 OPENAI_KEY 读
 # （run_5r 的 _load_dotenv 已加载进 os.environ）。留空则走 pipeline 默认普通答题。

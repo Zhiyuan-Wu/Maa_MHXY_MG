@@ -246,7 +246,8 @@ SOLO_ENTRIES = ["shuangbei", "huoli", "fuli_qiandao", "shimen_renwu_new", "yunbi
 if datetime.now().weekday() == 2:
     SOLO_ENTRIES.insert(0, "bangpai_renwu")
 if datetime.now().weekday() < 5:
-    SOLO_ENTRIES.insert(0, "kejuxiangshi")
+    # SOLO_ENTRIES.insert(0, "kejuxiangshi")
+    SOLO_ENTRIES.append("kejuxiangshi")
 
 # 科举乡试 AI 答题凭证（对应 interface.json「是否使用Ai进行答题=Yes」）。
 # 用 deepseek（openai 兼容端点）。apikey 从 .env 的 OPENAI_KEY 读（_load_dotenv 已加载进 os.environ）。
