@@ -218,17 +218,19 @@
             "[JumpBack]战斗平衡弹窗-点击关闭",
             "[JumpBack]战斗中-等待5秒",
             "宝图完成判断",
-            "[JumpBack]宝图-间隔30秒-最大10分钟",
-            "[JumpBack]宝图任务单次点击"
+            "[JumpBack]宝图任务单次点击",
+            "[JumpBack]宝图-间隔30秒-最大10分钟"
         ]
     },
     "kaishi_datu": {
         "next": []
     },
     "宝图任务单次点击": {
+        "max_hit": 100,
         "recognition": "OCR",
         "expected": [
-            "宝图任务"
+            "宝图任务",
+            "贼王"
         ],
         "roi": [
             1034,
@@ -237,7 +239,8 @@
             336
         ],
         "pre_delay": 500,
-        "action": "Click"
+        "action": "Click",
+        "post_delay": 3000
     },
     "宝图-间隔30秒-最大10分钟": {
         "max_hit": 20,
