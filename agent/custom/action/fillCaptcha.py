@@ -19,11 +19,11 @@ from utils import logger
 
 # agent/custom/action/ → 上三级 = 仓库根（含 assets/）。拼 keypad 模板绝对路径，
 # 不依赖 Resource 是否加载了 NeteaseServer 叠加（run_5r standalone 只 post_bundle(base/)，
-# 直接给 template 绝对路径让 MaaFw 内部 imread 读）。
+# 直接给 template 绝对路径让 MaaFw 内部 imread 读）。模板实际位于 base/zonghe/（综合公共资源）。
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_DIR = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", ".."))
 _DEFAULT_KEYPAD = os.path.join(
-    _REPO_DIR, "assets", "resource", "NeteaseServer", "image", "keypad1.png"
+    _REPO_DIR, "assets", "resource", "base", "image", "zonghe", "keypad1.png"
 )
 
 
