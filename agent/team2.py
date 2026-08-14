@@ -68,8 +68,8 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
 # 一致的星期调整（此处赋值后列表是"基础列表"，insert 不会与 run_5r 的调整重复）。
 SOLO_ENTRIES = ["5R_duiyuan_tuichuduiwu", "shuangbei", "huoli", "fuli_qiandao", "shimen_renwu_new", "yunbiao_renwu2",
                 "baotu_renwu", "wabaotu_qingli",
-                "mijing_renwu", "sanjieqiyuan", "huoyue_lingqu",
-                "zhengli_baibao", "jiayuan_zhengli", "zhanghao_xinxi", "jialan"]
+                "mijing_renwu", "sanjieqiyuan",
+                "zhengli_baibao", "jiayuan_zhengli", "zhanghao_xinxi", "jialan", "baitanchushou"]
 if datetime.now().weekday() == 2:
     SOLO_ENTRIES.insert(1, "bangpai_renwu")
 if datetime.now().weekday() < 5:    # 工作日

@@ -241,7 +241,7 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
 # 单人任务列表（任务间自动插 barrier：solo_all 每个entry前 sleep5 + 打开大地图重置位置，
 # 故这里不再手动插"打开大地图_69副本"）。
 SOLO_ENTRIES = ["5R_duiyuan_tuichuduiwu", "shuangbei", "huoli", "fuli_qiandao", "shimen_renwu_new", "yunbiao_renwu2", "baotu_renwu", "wabaotu_qingli",
-                "mijing_renwu", "sanjieqiyuan", "huoyue_lingqu", "zhengli_baibao", "jiayuan_zhengli", "huoli", "zhanghao_xinxi", "jialan"]
+                "mijing_renwu", "sanjieqiyuan", "zhengli_baibao", "jiayuan_zhengli", "huoli", "zhanghao_xinxi", "jialan", "baitanchushou"]
 
 if datetime.now().weekday() == 2:
     SOLO_ENTRIES.insert(1, "bangpai_renwu")
