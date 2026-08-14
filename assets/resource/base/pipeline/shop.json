@@ -113,9 +113,20 @@
             197,
             75
         ],
-        "pre_delay": 200,
+        "pre_delay": 2000,
         "action": "Click",
-        "repeat": 2
+        "repeat": 2,
+        "next": [
+            "摆摊-出售物品"
+        ]
+    },
+    "摆摊-出售物品": {
+        "action": "Custom",
+        "custom_action": "shopScan",
+        "custom_action_param": {},
+        "next": [
+            "panduan_zhujiemian"
+        ]
     },
     "摆摊-上架物品": {
         "recognition": "OCR",

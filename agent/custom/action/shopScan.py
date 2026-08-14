@@ -475,13 +475,6 @@ class ShopScan(CustomAction):
         )
         td = context.run_task(
             self._DELIST_ENTRY,
-            pipeline_override={
-                self._DELIST_ENTRY: {
-                    "next": [self._DELIST_CLOSE_NODE],   # 子任务内 JumpBack 栈空，直接串关浮窗
-                    "timeout": self._DEFAULT_DELIST_TIMEOUT,
-                },
-                self._DELIST_CLOSE_NODE: {"timeout": self._DEFAULT_DELIST_TIMEOUT},
-            },
         )
         hit = False
         if td is None:
@@ -829,12 +822,13 @@ class ShopScan(CustomAction):
         detail_wait = float(argv_dict.get("detail_wait", self._DEFAULT_DETAIL_WAIT))
         close_wait = float(argv_dict.get("close_wait", self._DEFAULT_CLOSE_WAIT))
         threshold = float(argv_dict.get("threshold", self._DEFAULT_THRESHOLD))
+        enable_price_scan = bool(argv_dict.get('enable_price_scan', True))
 
         tag = self._account_tag(context)
         logger.info(
             f"[shopScan] [{tag}] ===== 开始（编排：A1 空栏位 → A2 过期扫描 → C 倒序下架 → "
             f"listable=min(8,x+y) → B 可选价格扫描）enable_price_scan="
-            f"{bool(argv_dict.get('enable_price_scan'))} ====="
+            f"{enable_price_scan} ====="
         )
 
         # ===== 阶段 A：空栏位清点（纯 ColorMatch，无点击）=====
@@ -864,7 +858,7 @@ class ShopScan(CustomAction):
         items = []
         centers = []
         sold = {"sold": [], "sold_count": 0, "candidates": 0}
-        if argv_dict.get("enable_price_scan"):
+        if enable_price_scan:
             centers = self._grid_centers(grid_roi, rows, cols)
             logger.info(
                 f"[shopScan] [{tag}] 阶段B1 只读扫描开始 grid_roi={grid_roi} {rows}x{cols}="
