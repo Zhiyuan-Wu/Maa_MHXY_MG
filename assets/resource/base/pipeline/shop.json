@@ -1,0 +1,190 @@
+{
+    "摆摊-chushoushanghui": {
+        "next": [
+            "[JumpBack]panduan_zhujiemian_ks",
+            "摆摊-打开摆摊"
+        ]
+    },
+    "摆摊-打开摆摊": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/chenghao.png",
+            "zonghe/jiahao.png"
+        ],
+        "roi": [
+            1206,
+            637,
+            66,
+            57
+        ],
+        "pre_delay": 200,
+        "action": "ClickKey",
+        "key": [
+            57,
+            29
+        ],
+        "post_delay": 1000,
+        "next": [
+            "摆摊-打开摆摊成功",
+            "[JumpBack]摆摊-摆摊界面-按键打开失败-点击摆摊图标"
+        ]
+    },
+    "摆摊-摆摊界面-按键打开失败-点击摆摊图标": {
+        "recognition": "Or",
+        "any_of": [
+            {
+                "recognition": "TemplateMatch",
+                "template": [
+                    "shangcheng/shangcheng.png"
+                ],
+                "threshold": [
+                    0.9
+                ],
+                "roi": [
+                    2,
+                    175,
+                    86,
+                    89
+                ]
+            },
+            {
+                "recognition": "OCR",
+                "expected": [
+                    "商城"
+                ],
+                "roi": [
+                    2,
+                    175,
+                    86,
+                    89
+                ]
+            }
+        ],
+        "pre_delay": 500,
+        "action": "Click",
+        "post_delay": 1000
+    },
+    "摆摊-打开摆摊成功": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "shangcheng/baitan_zhujiemian.png",
+            "shangcheng/baitan_zhujiemian2.png",
+            "shangcheng/baitan_zhujiemian3.png"
+        ],
+        "roi": [
+            435,
+            0,
+            382,
+            119
+        ],
+        "threshold": [
+            0.8
+        ],
+        "next": [
+            "摆摊-点击摆摊"
+        ]
+    },
+    "摆摊-点击摆摊": {
+        "recognition": "OCR",
+        "expected": [
+            "摆摊"
+        ],
+        "roi": [
+            1122,
+            252,
+            65,
+            102
+        ],
+        "pre_delay": 200,
+        "action": "Click",
+        "repeat": 2,
+        "next": [
+            "摆摊-点击我要出售"
+        ]
+    },
+    "摆摊-点击我要出售": {
+        "recognition": "OCR",
+        "expected": [
+            "我要出售"
+        ],
+        "roi": [
+            356,
+            63,
+            197,
+            75
+        ],
+        "pre_delay": 200,
+        "action": "Click",
+        "repeat": 2
+    },
+    "摆摊-上架物品": {
+        "recognition": "OCR",
+        "expected": [
+            "本服上架"
+        ],
+        "roi": [
+            863,
+            591,
+            168,
+            66
+        ],
+        "action": "Click",
+        "post_delay": 2000,
+        "next": [
+            "[JumpBack]摆摊-关闭上架成功",
+            "[JumpBack]摆摊-关闭浮窗",
+            "空节点"
+        ]
+    },
+    "摆摊-关闭上架成功": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "baitan/shangjia_queren.png"
+        ],
+        "roi": [
+            459,
+            94,
+            363,
+            91
+        ],
+        "action": "Click",
+        "target": [
+            610,
+            542,
+            57,
+            29
+        ],
+        "post_delay": 1000
+    },
+    "摆摊-下架过期物品": {
+        "recognition": "OCR",
+        "expected": [
+            "取回"
+        ],
+        "roi": [
+            667,
+            565,
+            179,
+            82
+        ],
+        "action": "Click",
+        "post_delay": 500,
+        "next": [
+            "[JumpBack]摆摊-关闭浮窗",
+            "空节点"
+        ]
+    },
+    "摆摊-关闭浮窗": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/baitan_xiangqing_guanbi.png"
+        ],
+        "roi": [
+            965,
+            41,
+            113,
+            171
+        ],
+        "action": "Click"
+    }
+}

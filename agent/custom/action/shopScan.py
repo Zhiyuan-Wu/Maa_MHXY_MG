@@ -17,11 +17,19 @@
    色域命中（浅米黄，``[234,220,201]–[254,240,221]``）= **该格有物品**（栏位底色被物品图标占据）；
    未命中（颜色更深，``[234..]`` 之外）= **空栏位**。统计空栏位数量 + 各点命中状态。
 2. **阶段 A2 — 过期标记扫描**：在与 A 同款 4×2 网格（起点 ``[163,185]``、roi ``80×80``、
-   步长 ``300/103``）上对 ``baitan/expired.png`` 做 **TemplateMatch（green_mask 开启）**。
+   步长 ``285/103``）上对 ``baitan/expired.png`` 做 **TemplateMatch（green_mask 开启）**。
    该模板约一半像素是纯绿 (0,255,0) 遮罩，green_mask 让匹配忽略绿色区、只比对真实"过期"
-   角标；逐点记录最佳匹配分数（``best_result.score``）与是否过阈值。
-3. **阶段 B — 物品价格扫描**：把「待售卖区」均分为 5×4 格点，逐格点击 → 判断详情页 →
-   OCR 商品名/当前价/市场价1/市场价2/当前价变化 → 关闭 → 下一格。
+   角标；逐点记录最佳匹配分数（``best_result.score``）。**分数 ≥ 0.8 → 该格记 ``expired``
+   （过期物品），否则 ``valid``**。
+3. **阶段 C — 下架过期物品**：**从后向前**逐个点击过期格点（点击坐标用 **A1 网格同索引**
+   的 roi，例 A2 (0,0) 过期 → 点 [365,206]），每点一格 ``run_task("摆摊-下架过期物品")``
+   执行取回（子任务内把 next 覆写成直接串「摆摊-关闭浮窗」，因独立子任务 JumpBack 栈空）。
+   **必须倒序**：post 取回后待售队列向前移动，倒序保证未处理格点坐标不错位。下架成功数 = y
+   （查 TaskDetail 节点 recognition.hit，防 on_error→空节点假成功）。
+4. **可上架计算**：``listable = min(8, x + y)``，x=空栏位数、y=下架数。
+5. **阶段 B（可选，默认关）— 物品价格扫描**：``enable_price_scan=true`` 时把「待售卖区」均分
+   为 5×4 格点，逐格点击 → 判断详情页 → OCR 商品名/当前价/市场价1/市场价2/当前价变化 →
+   关闭 → 下一格。默认关闭因会盲点 20 格（误售/误点风险）。
 
 写法参照：
 - ``fillCaptcha`` —— 自定义 action 内串起「截图 → run_recognition(pipeline_override
@@ -111,9 +119,9 @@ _VALID_PRICE_DELTA = frozenset({
 # Resource 是否加载了某个服务器叠加（与 fillCaptcha 同款手法）。
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_DIR = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", ".."))
-_DEFAULT_CLOSE_TEMPLATE = os.path.join(
-    _REPO_DIR, "assets", "resource", "base", "image", "shop", "close_btn.png"  # TODO: 放真实模板
-)
+# 阶段 B 关闭按钮模板：用 image 文件夹的相对路径（Resource 已加载 base，与
+# shop_test.json 同款）；相对路径由 MaaFw 资源层解析。
+_DEFAULT_CLOSE_TEMPLATE = "zonghe/baitan_xiangqing_guanbi.png"
 # 结构化结果落盘路径（与 logOcr 的 account_info.log 同目录 agent/data/）
 _RESULT_PATH = normpath(join(_THIS_DIR, "..", "..", "data", "shop_scan_result.json"))
 
@@ -144,14 +152,14 @@ class ShopScan(CustomAction):
     5 开并发串行写）。
     """
 
-    # ===== 待填占位符（custom_action_param 可覆盖）=====
-    _DEFAULT_GRID_ROI = [0, 0, 0, 0]            # TODO: 待售卖区整体 roi
-    _DEFAULT_CLOSE_ROI = [0, 0, 0, 0]           # TODO: 关闭按钮所在区
-    _DEFAULT_NAME_ROI = [0, 0, 0, 0]            # TODO: 商品名 OCR 区
-    _DEFAULT_PRICE_ROI = [0, 0, 0, 0]           # TODO: 当前价 OCR 区
-    _DEFAULT_MARKET_ROI = [0, 0, 0, 0]          # TODO: 市场价1 OCR 区（最高卖单）
-    _DEFAULT_MARKET2_ROI = [0, 0, 0, 0]         # TODO: 市场价2 OCR 区（第二高卖单）
-    _DEFAULT_PRICE_DELTA_ROI = [0, 0, 0, 0]     # TODO: 当前价变化 OCR 区
+    # ===== 阶段 B：价格扫描默认参数（值取自 shop_test.json 实测标定）=====
+    _DEFAULT_GRID_ROI = [751, 149, 354, 449]    # 待售卖区整体 roi [x,y,w,h]
+    _DEFAULT_CLOSE_ROI = [977, 31, 92, 83]      # 关闭按钮所在区
+    _DEFAULT_NAME_ROI = [763, 76, 224, 44]      # 商品名 OCR 区
+    _DEFAULT_PRICE_ROI = [827, 454, 141, 42]    # 当前价 OCR 区
+    _DEFAULT_MARKET_ROI = [396, 203, 171, 42]   # 市场价1 OCR 区（最高卖单）
+    _DEFAULT_MARKET2_ROI = [397, 314, 132, 41]  # 市场价2 OCR 区（第二高卖单）
+    _DEFAULT_PRICE_DELTA_ROI = [884, 493, 80, 42]  # 当前价变化 OCR 区
     _DEFAULT_ROWS = 5
     _DEFAULT_COLS = 4
     _DEFAULT_DETAIL_WAIT = 1.0                  # 点击格点后等弹窗的秒数
@@ -194,7 +202,16 @@ class ShopScan(CustomAction):
     _DEFAULT_EXP_COLS = 2
     _DEFAULT_EXP_CELL_W = 80
     _DEFAULT_EXP_CELL_H = 80
-    _DEFAULT_EXP_THRESHOLD = 0.7
+    _DEFAULT_EXP_THRESHOLD = 0.8
+
+    # ===== 下架编排（点击过期格点 → run_task 取回）默认参数 =====
+    # 过期格点用 **A1 网格同索引** 的 roi 坐标点击（例 A2 (0,0) 过期 → 点 A1 [365,206]）。
+    # 必须从后向前：post 取回后队列向前移动，倒序点保证未处理格点坐标不变。
+    _DELIST_ENTRY = "摆摊-下架过期物品"       # OCR「取回」→ 点击；子链关浮窗
+    _DELIST_CLOSE_NODE = "摆摊-关闭浮窗"      # run_task 独立子任务，JumpBack 栈空 → 直接串
+    _DEFAULT_DELIST_CLICK_WAIT = 1.0          # 点格点后等详情浮窗的秒数
+    _DEFAULT_DELIST_TIMEOUT = 5000            # 下架节点识别上限（ms），防空格白等 20s
+    _DEFAULT_LISTABLE_CAP = 8                 # 待售队列总长上限
 
     _LOCK = threading.Lock()  # 5 开并发串行写结果文件
 
@@ -298,10 +315,19 @@ class ShopScan(CustomAction):
 
         hits = []  # hits[i] = 该点是否有物品（命中色域）
         has_item_indices, empty_indices = [], []
+        logger.info(
+            f"[shopScan] [{tag}] 阶段A 开始：origin={origin} step=({col_dx},{row_dy}) "
+            f"{rows}x{cols} cell={cell_w}x{cell_h} 色域=[{lower},{upper}] count={count}"
+        )
         for idx, roi in enumerate(points):
             has_item = self._color_has_item(context, image, roi, lower, upper, count)
             hits.append(has_item)
             (has_item_indices if has_item else empty_indices).append(idx)
+            r, c = divmod(idx, cols)
+            logger.info(
+                f"[shopScan] [{tag}] 阶段A 点{idx} (r{r},c{c}) roi={roi} -> "
+                f"{'有物品' if has_item else '空栏位'}"
+            )
         logger.info(
             f"[shopScan] [{tag}] 阶段A 空栏位清点 count={count} 有物={has_item_indices} "
             f"空栏位={empty_indices}（空 {len(empty_indices)}/{len(points)}）"
@@ -347,7 +373,12 @@ class ShopScan(CustomAction):
         points = self._empty_slot_points(origin, col_dx, row_dy, cell_w, cell_h, rows, cols)
         image = context.tasker.controller.post_screencap().wait().get()
 
-        scores, hits, hit_indices = [], [], []
+        scores, hits, hit_indices, statuses = [], [], [], []
+        logger.info(
+            f"[shopScan] [{tag}] 阶段A2 开始：template={template} origin={origin} "
+            f"step=({col_dx},{row_dy}) {rows}x{cols} cell={cell_w}x{cell_h} "
+            f"threshold={threshold} green_mask={green_mask}"
+        )
         for idx, roi in enumerate(points):
             score = self._template_score(
                 context, image, self._EXPIRED_NODE, template, roi, threshold, green_mask
@@ -355,13 +386,20 @@ class ShopScan(CustomAction):
             hit = score >= threshold
             scores.append(score)
             hits.append(hit)
+            # 状态语义：过阈值 = expired（过期物品）；否则 = valid（正常在售）
+            statuses.append("expired" if hit else "valid")
             if hit:
                 hit_indices.append(idx)
+            r, c = divmod(idx, cols)
+            logger.info(
+                f"[shopScan] [{tag}] 阶段A2 点{idx} (r{r},c{c}) roi={roi} "
+                f"score={score:.3f} -> {statuses[-1]}{'（过阈值）' if hit else ''}"
+            )
         best = max(scores) if scores else 0.0
         logger.info(
             f"[shopScan] [{tag}] 阶段A2 过期标记扫描 green_mask={green_mask} threshold={threshold} "
-            f"分数={[round(s, 3) for s in scores]} 过阈值={hit_indices}（命中 {len(hit_indices)}/{len(points)}，"
-            f"最佳={best:.3f}）"
+            f"分数={[round(s, 3) for s in scores]} 状态={statuses} 过期={hit_indices}"
+            f"（expired {len(hit_indices)}/{len(points)}，最佳={best:.3f}）"
         )
         return {
             "template": template,
@@ -371,10 +409,103 @@ class ShopScan(CustomAction):
             "points": points,
             "scores": scores,
             "hits": hits,
+            "statuses": statuses,                 # "expired" | "valid"
             "hit_indices": hit_indices,
             "hit_count": len(hit_indices),
             "best_score": best,
         }
+
+    # ---------------- 阶段 C：下架过期物品编排 ----------------
+
+    def _delist_one(self, context, tag, click_roi):
+        """下架单个过期格点：点 A1 同索引 roi → run_task 下架 → 关浮窗。
+
+        ``run_task`` 是独立子任务（JumpBack 栈空），须把「摆摊-下架过期物品」的 next
+        由 ``[JumpBack]摆摊-关闭浮窗`` 覆写成直接串「摆摊-关闭浮窗」。返回是否真的点中
+        「取回」（查 TaskDetail 节点的 recognition.hit，防 on_error→空节点假成功）。
+        """
+        cx = int(click_roi[0] + click_roi[2] / 2)
+        cy = int(click_roi[1] + click_roi[3] / 2)
+        logger.info(
+            f"[shopScan] [{tag}] 阶段C 点击过期格点 roi={click_roi} @ ({cx},{cy})，"
+            f"等 {self._DEFAULT_DELIST_CLICK_WAIT}s 后查「取回」"
+        )
+        context.tasker.controller.post_click(cx, cy).wait()
+        if self._DEFAULT_DELIST_CLICK_WAIT > 0:
+            time.sleep(self._DEFAULT_DELIST_CLICK_WAIT)
+
+        logger.info(
+            f"[shopScan] [{tag}] 阶段C run_task({self._DELIST_ENTRY!r}) → next=[{self._DELIST_CLOSE_NODE}] "
+            f"timeout={self._DEFAULT_DELIST_TIMEOUT}ms"
+        )
+        td = context.run_task(
+            self._DELIST_ENTRY,
+            pipeline_override={
+                self._DELIST_ENTRY: {
+                    "next": [self._DELIST_CLOSE_NODE],   # 子任务内 JumpBack 栈空，直接串关浮窗
+                    "timeout": self._DEFAULT_DELIST_TIMEOUT,
+                },
+                self._DELIST_CLOSE_NODE: {"timeout": self._DEFAULT_DELIST_TIMEOUT},
+            },
+        )
+        hit = False
+        if td is None:
+            logger.warning(f"[shopScan] [{tag}] 阶段C run_task 返回 None（任务未启动）")
+        elif getattr(td, "nodes", None):
+            for n in td.nodes:
+                reco = getattr(n, "recognition", None)
+                n_hit = bool(reco and reco.hit)
+                logger.info(
+                    f"[shopScan] [{tag}] 阶段C 子任务节点 {n.name!r} hit={n_hit}"
+                )
+                if n.name == self._DELIST_ENTRY:
+                    hit = n_hit
+                    break
+        else:
+            logger.warning(f"[shopScan] [{tag}] 阶段C 子任务无节点轨迹（td.nodes 空）")
+        logger.info(
+            f"[shopScan] [{tag}] 阶段C 下架节点「{self._DELIST_ENTRY}」hit={hit}"
+            f"{'，y+1' if hit else '，未取回（不计入 y）'}"
+        )
+        return hit
+
+    def _delist_expired(self, context, tag, empty_slots, expired_marks):
+        """阶段 C：**从后向前**逐个下架过期物品。
+
+        为什么必须倒序：post「取回」后待售队列向前移动（后面的物品补上空位），若正序点，
+        第 i 格取回后第 i+1 格的实际内容已经前移，坐标就错位了。倒序从最后一格点起，
+        前面未处理的格点位置不受影响。点击坐标用 **A1 网格同索引** 的 roi（A2 的 80×80
+        roi 是给模板匹配扫过期角标用的，点选取区域要用 A1 的 30×30 色判 roi，例
+        A2 (0,0) 过期 → 点 [365,206]）。
+
+        返回 ``{"delisted": int, "indices": [...], "clicks": [...]}`` —— ``delisted``=y
+        （下架成功数），``indices``=处理的 A2 网格索引（倒序），``clicks``=实际点击的 A1 roi。
+        """
+        a1_points = empty_slots["points"]
+        hit_indices = expired_marks["hit_indices"]
+        cap = self._DEFAULT_LISTABLE_CAP
+        delisted, indices, clicks = 0, [], []
+        logger.info(
+            f"[shopScan] [{tag}] 阶段C 开始：过期格点={hit_indices}（将倒序处理 "
+            f"{sorted(hit_indices, reverse=True)}），A1 点击网格 {len(a1_points)} 点"
+        )
+        # 倒序：idx 大（靠后）的先点，队列前移不影响更靠前的未处理格点
+        for idx in sorted(hit_indices, reverse=True):
+            if idx >= len(a1_points):
+                logger.warning(f"[shopScan] [{tag}] 阶段C 索引 {idx} 超出 A1 网格，跳过")
+                continue
+            click_roi = a1_points[idx]
+            logger.info(f"[shopScan] [{tag}] 阶段C 处理过期格点 idx={idx}（倒序）")
+            ok = self._delist_one(context, tag, click_roi)
+            indices.append(idx)
+            clicks.append(click_roi)
+            if ok:
+                delisted += 1
+        logger.info(
+            f"[shopScan] [{tag}] 阶段C 下架完成 y={delisted}/{len(indices)}"
+            f"（处理 {indices}，点击 {clicks}，上限 {cap}）"
+        )
+        return {"delisted": delisted, "indices": indices, "clicks": clicks}
 
     def _template_box(self, context, image, node, template, roi, threshold):
         """在 ``roi`` 内 TemplateMatch ``template``，命中返回 ``best_result.box=[x,y,w,h]``，否则 None。"""
@@ -465,100 +596,125 @@ class ShopScan(CustomAction):
         threshold = float(argv_dict.get("threshold", self._DEFAULT_THRESHOLD))
 
         tag = self._account_tag(context)
+        logger.info(
+            f"[shopScan] [{tag}] ===== 开始（编排：A1 空栏位 → A2 过期扫描 → C 倒序下架 → "
+            f"listable=min(8,x+y) → B 可选价格扫描）enable_price_scan="
+            f"{bool(argv_dict.get('enable_price_scan'))} ====="
+        )
 
         # ===== 阶段 A：空栏位清点（纯 ColorMatch，无点击）=====
         empty_slots = self._scan_empty_slots(context, tag, argv_dict.get("empty_slots", {}))
+        x = empty_slots["empty_count"]   # x = 空栏位数
+        logger.info(f"[shopScan] [{tag}] 阶段A 完成：空栏位 x={x}/{len(empty_slots['points'])}")
 
         # ===== 阶段 A2：过期标记模板扫描（纯 TemplateMatch+green_mask，无点击）=====
         expired_marks = self._scan_expired(context, tag, argv_dict.get("expired_marks", {}))
 
-        # ===== 阶段 B：逐格扫描物品详情/价格 =====
-        centers = self._grid_centers(grid_roi, rows, cols)
+        # ===== 阶段 C：从后向前下架过期物品（点击 A1 同索引 roi → run_task 取回）=====
+        # 必须倒序：post 取回后队列向前移动，倒序点保证未处理格点坐标不错位。
+        delist = self._delist_expired(context, tag, empty_slots, expired_marks)
+        y = delist["delisted"]           # y = 下架成功数
+
+        # ===== 计算：可上架物品数量 = min(8, x + y) =====
+        listable = min(self._DEFAULT_LISTABLE_CAP, x + y)
         logger.info(
-            f"[shopScan] [{tag}] 阶段B 开始扫描 grid_roi={grid_roi} {rows}x{cols}="
-            f"{len(centers)} 格，close_roi={close_roi}"
+            f"[shopScan] [{tag}] 可上架计算：空栏位 x={x} + 下架 y={y} → "
+            f"min({self._DEFAULT_LISTABLE_CAP}, {x}+{y}) = {listable}"
         )
 
+        # ===== 阶段 B（可选）：逐格扫描物品详情/价格 =====
+        # 默认关闭——会盲点 20 格有误售/误点风险，仅在明确传 enable_price_scan=true 时跑。
         items = []
-        for (r, c, cx, cy) in centers:
-            logger.info(f"[shopScan] [{tag}] 点击格点 (r={r},c={c}) @ ({cx},{cy})")
-            context.tasker.controller.post_click(cx, cy).wait()
-            if detail_wait > 0:
-                time.sleep(detail_wait)
-                # TODO: 更稳的做法 —— 用 controller 的 wait_freezes 等画面静止，
-                #       替代固定 sleep（CLAUDE.md「少用 delay」约定）。
-
-            image = context.tasker.controller.post_screencap().wait().get()
-
-            # ③ 关闭按钮模板 = 详情页是否弹出的哨兵
-            close_box = self._template_box(
-                context, image, self._CLOSE_NODE, close_template, close_roi, threshold
+        centers = []
+        if argv_dict.get("enable_price_scan"):
+            centers = self._grid_centers(grid_roi, rows, cols)
+            logger.info(
+                f"[shopScan] [{tag}] 阶段B 开始扫描 grid_roi={grid_roi} {rows}x{cols}="
+                f"{len(centers)} 格，close_roi={close_roi}"
             )
-            if not close_box:
-                logger.info(f"[shopScan] [{tag}] (r={r},c={c}) 未弹出详情（sellable=False）")
+
+            for (r, c, cx, cy) in centers:
+                logger.info(f"[shopScan] [{tag}] 点击格点 (r={r},c={c}) @ ({cx},{cy})")
+                context.tasker.controller.post_click(cx, cy).wait()
+                if detail_wait > 0:
+                    time.sleep(detail_wait)
+                    # TODO: 更稳的做法 —— 用 controller 的 wait_freezes 等画面静止，
+                    #       替代固定 sleep（CLAUDE.md「少用 delay」约定）。
+
+                image = context.tasker.controller.post_screencap().wait().get()
+
+                # ③ 关闭按钮模板 = 详情页是否弹出的哨兵
+                close_box = self._template_box(
+                    context, image, self._CLOSE_NODE, close_template, close_roi, threshold
+                )
+                if not close_box:
+                    logger.info(f"[shopScan] [{tag}] (r={r},c={c}) 未弹出详情（sellable=False）")
+                    items.append({
+                        "row": r,
+                        "col": c,
+                        "grid_center": [cx, cy],
+                        "sellable": False,
+                    })
+                    continue
+
+                # ④ 详情已弹出：五处分别裸 OCR
+                name = self._ocr_text(context, image, self._NAME_NODE, name_roi, threshold)
+                price = self._clean_price(self._ocr_text(context, image, self._PRICE_NODE, price_roi, threshold))
+                market1 = self._clean_price(self._ocr_text(context, image, self._MARKET_NODE, market_roi, threshold))
+                market2 = self._clean_price(self._ocr_text(context, image, self._MARKET2_NODE, market2_roi, threshold))
+                # price_delta 是百分比（"+10%"）而非纯整数，保留原值不去分隔符
+                price_delta = self._ocr_text(
+                    context, image, self._PRICE_DELTA_NODE, price_delta_roi, threshold
+                )
+                # ⑤ price_delta 合法性断言：必须落在 _VALID_PRICE_DELTA（±10/20/30/40/50% + 空，共 11 种）。
+                #    不合法 → OCR 不可靠，该格 sellable=False（详情仍照常关闭，避免遗留弹窗挡住下一格）。
+                delta_valid = price_delta in _VALID_PRICE_DELTA
+                sellable = delta_valid
+                logger.info(
+                    f"[shopScan] [{tag}] (r={r},c={c}) name={name!r} price={price!r} "
+                    f"market1={market1!r} market2={market2!r} price_delta={price_delta!r} "
+                    f"-> sellable={sellable}" + ("" if delta_valid else "（delta 非法，降级 False）")
+                )
+
                 items.append({
                     "row": r,
                     "col": c,
                     "grid_center": [cx, cy],
-                    "sellable": False,
+                    "sellable": sellable,
+                    "name": name,
+                    "price": price,                 # 已清洗：纯整数字符串（""=OCR 无数字）
+                    "market_price1": market1,       # 市场价1（最高卖单），同上
+                    "market_price2": market2,       # 市场价2（第二高卖单），同上
+                    "price_delta": price_delta,
+                    "close_box": list(close_box),
                 })
-                continue
 
-            # ④ 详情已弹出：五处分别裸 OCR
-            name = self._ocr_text(context, image, self._NAME_NODE, name_roi, threshold)
-            price = self._clean_price(self._ocr_text(context, image, self._PRICE_NODE, price_roi, threshold))
-            market1 = self._clean_price(self._ocr_text(context, image, self._MARKET_NODE, market_roi, threshold))
-            market2 = self._clean_price(self._ocr_text(context, image, self._MARKET2_NODE, market2_roi, threshold))
-            # price_delta 是百分比（"+10%"）而非纯整数，保留原值不去分隔符
-            price_delta = self._ocr_text(
-                context, image, self._PRICE_DELTA_NODE, price_delta_roi, threshold
-            )
-            # ⑤ price_delta 合法性断言：必须落在 _VALID_PRICE_DELTA（±10/20/30/40/50% + 空，共 11 种）。
-            #    不合法 → OCR 不可靠，该格 sellable=False（详情仍照常关闭，避免遗留弹窗挡住下一格）。
-            delta_valid = price_delta in _VALID_PRICE_DELTA
-            sellable = delta_valid
-            logger.info(
-                f"[shopScan] [{tag}] (r={r},c={c}) name={name!r} price={price!r} "
-                f"market1={market1!r} market2={market2!r} price_delta={price_delta!r} "
-                f"-> sellable={sellable}" + ("" if delta_valid else "（delta 非法，降级 False）")
-            )
-
-            items.append({
-                "row": r,
-                "col": c,
-                "grid_center": [cx, cy],
-                "sellable": sellable,
-                "name": name,
-                "price": price,                 # 已清洗：纯整数字符串（""=OCR 无数字）
-                "market_price1": market1,       # 市场价1（最高卖单），同上
-                "market_price2": market2,       # 市场价2（第二高卖单），同上
-                "price_delta": price_delta,
-                "close_box": list(close_box),
-            })
-
-            # ⑥ 点关闭按钮中心关掉详情（复用 ③ 的命中框）
-            bx, by, bw, bh = close_box
-            context.tasker.controller.post_click(int(bx + bw / 2), int(by + bh / 2)).wait()
-            if close_wait > 0:
-                time.sleep(close_wait)
+                # ⑥ 点关闭按钮中心关掉详情（复用 ③ 的命中框）
+                bx, by, bw, bh = close_box
+                context.tasker.controller.post_click(int(bx + bw / 2), int(by + bh / 2)).wait()
+                if close_wait > 0:
+                    time.sleep(close_wait)
 
         # 全部扫完 → 落盘
         payload = {
             "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "account": tag,
-            "empty_slots": empty_slots,         # 阶段 A 结果
+            "empty_slots": empty_slots,         # 阶段 A 结果（x = empty_count）
             "expired_marks": expired_marks,     # 阶段 A2 结果（过期标记模板扫描）
+            "delist": delist,                   # 阶段 C 结果（y = delisted）
+            "listable": listable,               # min(8, x+y)
             "grid_roi": grid_roi,
             "rows": rows,
             "cols": cols,
-            "items": items,                     # 阶段 B 结果
+            "items": items,                     # 阶段 B 结果（enable_price_scan 才有）
         }
         self._save(payload)
         sellable_n = sum(1 for it in items if it.get("sellable"))
         logger.info(
-            f"[shopScan] [{tag}] 扫描完成 阶段A空栏位={empty_slots['empty_count']}/"
+            f"[shopScan] [{tag}] 扫描完成 阶段A空栏位 x={empty_slots['empty_count']}/"
             f"{len(empty_slots['points'])}，阶段A2过期标记={expired_marks['hit_count']}/"
             f"{len(expired_marks['points'])}(best={expired_marks['best_score']:.3f})，"
+            f"阶段C下架 y={delist['delisted']}，可上架 listable={listable}，"
             f"阶段B {len(items)}/{len(centers)} 格 sellable={sellable_n}"
         )
         return CustomAction.RunResult(success=True)

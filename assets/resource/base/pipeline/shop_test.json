@@ -1,0 +1,44 @@
+{
+    "商店扫描-测试": {
+        "action": "Custom",
+        "custom_action": "shopScan",
+        "custom_action_param": {
+            "empty_slots": {
+                "origin": [365, 206],
+                "col_dx": 300,
+                "row_dy": 103,
+                "rows": 4,
+                "cols": 2,
+                "cell_w": 30,
+                "cell_h": 30,
+                "lower": [234, 220, 201],
+                "upper": [254, 240, 221],
+                "count": 720
+            },
+            "expired_marks": {
+                "origin": [163, 185],
+                "col_dx": 285,
+                "row_dy": 103,
+                "rows": 4,
+                "cols": 2,
+                "cell_w": 80,
+                "cell_h": 80,
+                "threshold": 0.8
+            },
+            "grid_roi": [751, 149, 354, 449],
+            "rows": 5,
+            "cols": 4,
+            "close_template": "zonghe/baitan_xiangqing_guanbi.png",
+            "close_roi": [977, 31, 92, 83],
+            "name_roi": [763, 76, 224, 44],
+            "price_roi": [827, 454, 141, 42],
+            "market_roi": [396, 203, 171, 42],
+            "market2_roi": [397, 314, 132, 41],
+            "price_delta_roi": [884, 493, 80, 42],
+            "detail_wait": 1.0,
+            "close_wait": 0.5,
+            "threshold": 0.7
+        },
+        "next": []
+    }
+}
