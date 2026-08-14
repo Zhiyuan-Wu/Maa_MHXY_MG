@@ -125,6 +125,28 @@ _DEFAULT_CLOSE_TEMPLATE = "zonghe/baitan_xiangqing_guanbi.png"
 # 结构化结果落盘路径（与 logOcr 的 account_info.log 同目录 agent/data/）
 _RESULT_PATH = normpath(join(_THIS_DIR, "..", "..", "data", "shop_scan_result.json"))
 
+_50_MAP = {
+    # 防具
+    "鞋": "绿靴", "腰带": "乱牙咬", "项链": "荧光坠子", "发钗": "媚狐头饰",
+    "头盔": "羊角盔", "女衣": "金缕羽衣", "男衣": "钢甲",
+    # 武器
+    "长戈": "三星戈", "牵星尺": "星帆尺", "云锦扇": "蝉翼锦", "宝珠": "蓬莱珠",
+    "弯刀": "冷月弯刀", "降魔杵": "金刚杵", "双短剑": "鱼骨双剑", "长刀": "破天宝刀",
+    "鞭": "青藤鞭", "锤": "破甲战锤", "环圈": "赤炎环", "斧钺": "黄金钺",
+    "飘带": "云龙绸带", "扇": "劈水扇", "爪刺": "玄冰刺", "弓": "玉腰弯弓",
+    "魔棒": "幽路引魂", "枪": "墨杆金钩", "法杖": "星云杖", "剑": "黄金剑",
+}
+_60_MAP = {
+    # 防具
+    "鞋": "追星踏月", "腰带": "双魂引", "项链": "风月宝链", "发钗": "玉女发冠",
+    "头盔": "水晶帽", "女衣": "霓裳羽衣", "男衣": "夜魔披风",
+    # 武器
+    "长戈": "天山辰律", "牵星尺": "北落师门", "云锦扇": "桃之夭夭", "宝珠": "金露函烟",
+    "弯刀": "埃兰弯刀", "降魔杵": "摩星杵", "双短剑": "落星双剑", "长刀": "秋水刀",
+    "鞭": "雪绒鞭", "锤": "震天锤", "环圈": "蛇形月", "斧钺": "乌金鬼头镰",
+    "飘带": "七彩罗刹", "扇": "清秋扇", "爪刺": "青刚刺", "魔棒": "满天星",
+    "枪": "玄铁矛", "法杖": "天山雪", "剑": "游龙剑", "弓": "连珠神弓",
+}
 
 @AgentServer.custom_action("shopScan")
 class ShopScan(CustomAction):
@@ -212,6 +234,19 @@ class ShopScan(CustomAction):
     _DEFAULT_DELIST_CLICK_WAIT = 1.0          # 点格点后等详情浮窗的秒数
     _DEFAULT_DELIST_TIMEOUT = 5000            # 下架节点识别上限（ms），防空格白等 20s
     _DEFAULT_LISTABLE_CAP = 8                 # 待售队列总长上限
+
+    # ===== 卖出编排（两遍法：先只读扫描 20 格 → 倒序卖出）默认参数 =====
+    # 目标物品 = 详情名命中 _50_MAP/_60_MAP 的 value（装备名）。等级 → 最低保护价 MIN_PRICE：
+    # 50 级 500、60 级 900。最低卖出价 = max(MIN_PRICE, (market1+market2)/2 - 1)
+    # （MIN_PRICE 是硬下限保护价，市场均价更高时跟市场）。
+    _SELL_ENTRY = "摆摊-上架物品"              # OCR「本服上架」→ 点击；原样 run_task，不 override
+    _MIN_PRICE_50 = 500                        # 50 级装备最低卖出价
+    _MIN_PRICE_60 = 900                        # 60 级装备最低卖出价
+    # 详情页价格档按钮（roi，点击其中心）：一档 = 基准价 ±10%
+    _PRICE_DOWN_ROI = [746, 462, 29, 24]       # 减小一档（基准价-10%）
+    _PRICE_UP_ROI = [985, 463, 25, 25]         # 增大一档（基准价+10%）
+    _DEFAULT_SELL_CLICK_WAIT = 1.0             # 卖出流程各步点击后等待秒数
+    _DEFAULT_SELL_TIMEOUT = 8000               # 上架节点识别上限（ms）
 
     _LOCK = threading.Lock()  # 5 开并发串行写结果文件
 
@@ -507,6 +542,206 @@ class ShopScan(CustomAction):
         )
         return {"delisted": delisted, "indices": indices, "clicks": clicks}
 
+    # ---------------- 阶段 D：卖出编排（两遍法） ----------------
+
+    @staticmethod
+    def _match_sell_target(name):
+        """物品名命中 ``_50_MAP``/``_60_MAP`` 的 value → 返回 ``(level, min_price)``，否则 None。
+
+        例 name="夜魔披风" 命中 _60_MAP["男衣"] → ``("60", 900)``。
+        """
+        for value in _60_MAP.values():
+            if value in (name or ""):
+                return "60", 900
+        for value in _50_MAP.values():
+            if value in (name or ""):
+                return "50", 500
+        return None
+
+    @staticmethod
+    def _plan_price_adjust(current, delta_str, min_sell):
+        """由当前价 + 详情页「当前价变化」推基准价，算出调到 ≥ min_sell 的点击次数。
+
+        基准价**不能**只靠 current 反推——``(base=current, k=0)`` 永远完美重构（例 450 既可
+        是 500 的 -10% 档、也可自为基准）。真正的信号是详情页 OCR 的 ``delta_str``
+        （``"-10%"`` → ``current/0.9`` = 基准价）。档位 = 基准价 ±10% 整数倍（±5 档封顶）。
+
+        返回 ``(base, k_now, n_up, n_down, new_price)``：``n_up``/``n_down`` = 点
+        「增大/减小一档」次数（其一为 0）、``new_price`` = 调整后所在档的价格。
+        例 ``plan(450, "-10%", 600)`` → 基准 500、当前 -1 档、目标 +2 档（600）→ +3 次。
+        """
+        # delta_str（"+10%"/"-20%"…，""=0 档）→ 当前档位 k_now
+        k_now = 0
+        ds = (delta_str or "").replace(" ", "")
+        if ds.endswith("%"):
+            try:
+                k_now = int(round(int(ds[:-1]) / 10))
+            except ValueError:
+                k_now = 0
+        k_now = max(-5, min(5, k_now))
+        # 反推基准价（取整到 10；游戏标价个位为 0）
+        base = int(round(current / (1 + 0.1 * k_now) / 10.0)) * 10
+        if base <= 0:
+            base = max(10, int(round(current / 10.0)) * 10)
+            k_now = 0
+        # 目标：调到 **≥ min_sell 的最小档位**（双向调——高了要降，尽快卖出）。
+        # 例：600（+2 档，基准 500）、floor=474 → 目标 0 档（500），点「-10%」2 次。
+        k_target = None
+        for k in range(-5, 6):
+            if int(round(base * (1 + 0.1 * k))) >= min_sell:
+                k_target = k
+                break
+        if k_target is None:
+            k_target = 5   # 全档位都到不了（min_sell 异常大），顶格 +50%
+        new_price = int(round(base * (1 + 0.1 * k_target)))
+        n_up = max(0, k_target - k_now)
+        n_down = max(0, k_now - k_target)
+        return base, k_now, n_up, n_down, new_price
+
+    def _click_roi_center(self, context, roi):
+        """点 roi 中心（调价按钮等固定区域）。"""
+        cx = int(roi[0] + roi[2] / 2)
+        cy = int(roi[1] + roi[3] / 2)
+        context.tasker.controller.post_click(cx, cy).wait()
+        return cx, cy
+
+    def _sell_one(self, context, tag, item):
+        """卖出单个物品：点格点 → 核对名字 → 读当前价 → 调价 → run_task 上架。
+
+        ``item`` 是阶段 B1 只读扫描的记录（含 name/price/market_price1/market_price2/
+        grid_center/level/min_price）。返回是否上架成功（查「摆摊-上架物品」节点 hit）。
+        """
+        cx, cy = item["grid_center"]
+        name, level, min_price = item["name"], item["level"], item["min_price"]
+        m1, m2 = int(item["market_price1"]), int(item["market_price2"])
+
+        # 最低卖出价 = max(MIN_PRICE, (market1+market2)/2 - 1)：
+        # MIN_PRICE（50级500/60级900）是**硬下限**（保护价，绝不击穿）；
+        # 市场均价更高时跟市场（(m1+m2)/2-1 比第二高卖单还低 1，保证竞争力）。
+        floor_price = max(min_price, int((m1 + m2) / 2) - 1)
+        logger.info(
+            f"[shopScan] [{tag}] 阶段D 卖出 {name!r}(Lv{level}) @ ({cx},{cy})："
+            f"当前价={item['price']} 市场价1={m1} 市场价2={m2} → "
+            f"max({min_price}, ({m1}+{m2})/2-1) = {floor_price}"
+        )
+
+        # ① 点格点开详情
+        context.tasker.controller.post_click(cx, cy).wait()
+        if self._DEFAULT_SELL_CLICK_WAIT > 0:
+            time.sleep(self._DEFAULT_SELL_CLICK_WAIT)
+        image = context.tasker.controller.post_screencap().wait().get()
+
+        # ② 重新读名字核对（两遍法之间队列可能变了，防卖错东西）
+        cur_name = self._ocr_text(context, image, self._NAME_NODE,
+                                  item.get("name_roi"), item.get("threshold", 0.7))
+        if name not in cur_name and cur_name not in name:
+            logger.warning(
+                f"[shopScan] [{tag}] 阶段D 格点名字变了（期望 {name!r} 实读 {cur_name!r}），跳过"
+            )
+            self._close_detail(context, image, item)
+            return False
+
+        # ③ 重读当前价 + 当前价变化（卖出时的实时值，比扫描时的快照更可靠；
+        #    delta 是推基准价的关键信号——仅凭 current 无法区分 0 档与 ±档）
+        price_str = self._clean_price(self._ocr_text(
+            context, image, self._PRICE_NODE, item.get("price_roi"), item.get("threshold", 0.7)))
+        delta_str = self._ocr_text(
+            context, image, self._PRICE_DELTA_NODE, item.get("price_delta_roi"),
+            item.get("threshold", 0.7))
+        if not price_str.isdigit():
+            logger.warning(f"[shopScan] [{tag}] 阶段D 当前价 OCR 无数字（{price_str!r}），跳过")
+            self._close_detail(context, image, item)
+            return False
+        current = int(price_str)
+
+        # ④ 算档位并调价（delta_str 推基准价）
+        base, k_now, n_up, n_down, new_price = self._plan_price_adjust(
+            current, delta_str, floor_price)
+        logger.info(
+            f"[shopScan] [{tag}] 阶段D 调价：当前 {current}（delta={delta_str!r} → 基准 {base}，"
+            f"{k_now:+d} 档）→ 需 ≥{floor_price} → 目标档价 {new_price}（+{n_up} 档 / -{n_down} 档）"
+        )
+        for _ in range(n_up):
+            x, y = self._click_roi_center(context, self._PRICE_UP_ROI)
+            logger.info(f"[shopScan] [{tag}] 阶段D 点「+10%」@ ({x},{y})")
+            if self._DEFAULT_SELL_CLICK_WAIT > 0:
+                time.sleep(self._DEFAULT_SELL_CLICK_WAIT)
+        for _ in range(n_down):
+            x, y = self._click_roi_center(context, self._PRICE_DOWN_ROI)
+            logger.info(f"[shopScan] [{tag}] 阶段D 点「-10%」@ ({x},{y})")
+            if self._DEFAULT_SELL_CLICK_WAIT > 0:
+                time.sleep(self._DEFAULT_SELL_CLICK_WAIT)
+
+        # ⑤ 原样 run_task 上架（不 override —— 节点自带 post_delay/关闭子链）
+        logger.info(f"[shopScan] [{tag}] 阶段D run_task({self._SELL_ENTRY!r})（原样，不 override）")
+        td = context.run_task(self._SELL_ENTRY)
+        hit = False
+        if td is None:
+            logger.warning(f"[shopScan] [{tag}] 阶段D run_task 返回 None（任务未启动）")
+        else:
+            for n in (getattr(td, "nodes", None) or []):
+                reco = getattr(n, "recognition", None)
+                n_hit = bool(reco and reco.hit)
+                logger.info(f"[shopScan] [{tag}] 阶段D 上架子任务节点 {n.name!r} hit={n_hit}")
+                if n.name == self._SELL_ENTRY:
+                    hit = n_hit
+                    break
+        logger.info(f"[shopScan] [{tag}] 阶段D 上架「{name}」hit={hit}{'，卖出+1' if hit else '，失败'}")
+        return hit
+
+    def _close_detail(self, context, image, item):
+        """用关闭按钮模板关掉当前详情浮窗（扫不到则点 close_roi 中心兜底）。"""
+        box = self._template_box(
+            context, image, self._CLOSE_NODE, _DEFAULT_CLOSE_TEMPLATE,
+            item.get("close_roi", self._DEFAULT_CLOSE_ROI), item.get("threshold", 0.7)
+        )
+        if box:
+            self._click_roi_center(context, box)
+        else:
+            logger.warning("[shopScan] 阶段D 关闭按钮未命中，点 close_roi 中心兜底")
+            self._click_roi_center(context, item.get("close_roi", self._DEFAULT_CLOSE_ROI))
+        if self._DEFAULT_SELL_CLICK_WAIT > 0:
+            time.sleep(self._DEFAULT_SELL_CLICK_WAIT)
+
+    def _sell_phase(self, context, tag, items, listable):
+        """阶段 D：**从后向前**卖出命中装备表的物品，直到卖出数达 ``listable`` 或扫完。
+
+        两遍法的第二遍。为什么倒序：上架成功后待售卖区所有物品**向前移动一格**，正序点
+        会让后续格点错位；倒序从最后一格卖起，前面未卖物品的坐标不变。每格卖出前会
+        重新 OCR 名字核对（两遍之间队列若被动过，防卖错）。
+        """
+        # 只卖「命中装备表 + 有完整市场价」的记录
+        candidates = []
+        for it in items:
+            tgt = self._match_sell_target(it.get("name", ""))
+            if not tgt:
+                continue
+            if not (str(it.get("market_price1", "")).isdigit()
+                    and str(it.get("market_price2", "")).isdigit()):
+                logger.info(
+                    f"[shopScan] [{tag}] 阶段D {it.get('name')!r} 命中装备表但市场价不全"
+                    f"（m1={it.get('market_price1')!r} m2={it.get('market_price2')!r}），跳过"
+                )
+                continue
+            level, min_price = tgt
+            candidates.append({**it, "level": level, "min_price": min_price})
+        logger.info(
+            f"[shopScan] [{tag}] 阶段D 候选卖出（倒序）："
+            f"{[(c['name'], c['level'], c['grid_center']) for c in reversed(candidates)]}"
+            f"，listable 上限 {listable}"
+        )
+        sold = []
+        for it in reversed(candidates):
+            if len(sold) >= listable:
+                logger.info(f"[shopScan] [{tag}] 阶段D 卖出数已达 listable={listable}，停止")
+                break
+            ok = self._sell_one(context, tag, it)
+            if ok:
+                sold.append({"name": it["name"], "level": it["level"],
+                             "grid_center": it["grid_center"]})
+        logger.info(f"[shopScan] [{tag}] 阶段D 卖出完成：{len(sold)}/{listable} → {sold}")
+        return {"sold": sold, "sold_count": len(sold), "candidates": len(candidates)}
+
     def _template_box(self, context, image, node, template, roi, threshold):
         """在 ``roi`` 内 TemplateMatch ``template``，命中返回 ``best_result.box=[x,y,w,h]``，否则 None。"""
         reco = context.run_recognition(
@@ -622,19 +857,22 @@ class ShopScan(CustomAction):
             f"min({self._DEFAULT_LISTABLE_CAP}, {x}+{y}) = {listable}"
         )
 
-        # ===== 阶段 B（可选）：逐格扫描物品详情/价格 =====
-        # 默认关闭——会盲点 20 格有误售/误点风险，仅在明确传 enable_price_scan=true 时跑。
+        # ===== 阶段 B（可选，两遍法）：B1 只读扫描 20 格 → D 倒序卖出 =====
+        # 默认关闭——会点 20 格有误售/误点风险，仅在明确传 enable_price_scan=true 时跑。
+        # B1 只读（读完即关详情，不卖）；D 遍（_sell_phase）从后向前卖出，因为上架成功后
+        # 待售卖区所有物品向前移动一格，倒序保证未卖格点坐标不错位。
         items = []
         centers = []
+        sold = {"sold": [], "sold_count": 0, "candidates": 0}
         if argv_dict.get("enable_price_scan"):
             centers = self._grid_centers(grid_roi, rows, cols)
             logger.info(
-                f"[shopScan] [{tag}] 阶段B 开始扫描 grid_roi={grid_roi} {rows}x{cols}="
+                f"[shopScan] [{tag}] 阶段B1 只读扫描开始 grid_roi={grid_roi} {rows}x{cols}="
                 f"{len(centers)} 格，close_roi={close_roi}"
             )
 
             for (r, c, cx, cy) in centers:
-                logger.info(f"[shopScan] [{tag}] 点击格点 (r={r},c={c}) @ ({cx},{cy})")
+                logger.info(f"[shopScan] [{tag}] B1 点击格点 (r={r},c={c}) @ ({cx},{cy})")
                 context.tasker.controller.post_click(cx, cy).wait()
                 if detail_wait > 0:
                     time.sleep(detail_wait)
@@ -670,10 +908,18 @@ class ShopScan(CustomAction):
                 #    不合法 → OCR 不可靠，该格 sellable=False（详情仍照常关闭，避免遗留弹窗挡住下一格）。
                 delta_valid = price_delta in _VALID_PRICE_DELTA
                 sellable = delta_valid
+                # 命中装备表（_50/_60_MAP value）→ 阶段 D 的卖出候选
+                tgt = self._match_sell_target(name)
+                if tgt:
+                    sellable = sellable and bool(
+                        market1.isdigit() and market2.isdigit()
+                    )
                 logger.info(
                     f"[shopScan] [{tag}] (r={r},c={c}) name={name!r} price={price!r} "
                     f"market1={market1!r} market2={market2!r} price_delta={price_delta!r} "
-                    f"-> sellable={sellable}" + ("" if delta_valid else "（delta 非法，降级 False）")
+                    f"-> sellable={sellable}"
+                    + ("" if delta_valid else "（delta 非法，降级 False）")
+                    + (f"（命中装备表 Lv{tgt[0]}）" if tgt else "")
                 )
 
                 items.append({
@@ -687,13 +933,22 @@ class ShopScan(CustomAction):
                     "market_price2": market2,       # 市场价2（第二高卖单），同上
                     "price_delta": price_delta,
                     "close_box": list(close_box),
+                    # 供阶段 D 复用的 roi 快照（同一 detail/close/OCR 区域）
+                    "name_roi": name_roi,
+                    "price_roi": price_roi,
+                    "price_delta_roi": price_delta_roi,
+                    "close_roi": close_roi,
+                    "threshold": threshold,
                 })
 
-                # ⑥ 点关闭按钮中心关掉详情（复用 ③ 的命中框）
+                # ⑥ 点关闭按钮中心关掉详情（复用 ③ 的命中框）—— B1 只读，不卖
                 bx, by, bw, bh = close_box
                 context.tasker.controller.post_click(int(bx + bw / 2), int(by + bh / 2)).wait()
                 if close_wait > 0:
                     time.sleep(close_wait)
+
+            # ===== 阶段 D：从后向前卖出（上限 listable）=====
+            sold = self._sell_phase(context, tag, items, listable)
 
         # 全部扫完 → 落盘
         payload = {
@@ -706,7 +961,8 @@ class ShopScan(CustomAction):
             "grid_roi": grid_roi,
             "rows": rows,
             "cols": cols,
-            "items": items,                     # 阶段 B 结果（enable_price_scan 才有）
+            "items": items,                     # 阶段 B1 结果（enable_price_scan 才有）
+            "sold": sold,                       # 阶段 D 结果（卖出明细）
         }
         self._save(payload)
         sellable_n = sum(1 for it in items if it.get("sellable"))
@@ -715,6 +971,7 @@ class ShopScan(CustomAction):
             f"{len(empty_slots['points'])}，阶段A2过期标记={expired_marks['hit_count']}/"
             f"{len(expired_marks['points'])}(best={expired_marks['best_score']:.3f})，"
             f"阶段C下架 y={delist['delisted']}，可上架 listable={listable}，"
-            f"阶段B {len(items)}/{len(centers)} 格 sellable={sellable_n}"
+            f"阶段B1 {len(items)}/{len(centers)} 格 sellable={sellable_n}，"
+            f"阶段D 卖出 {sold['sold_count']}/{listable}"
         )
         return CustomAction.RunResult(success=True)

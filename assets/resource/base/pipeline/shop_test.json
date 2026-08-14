@@ -37,6 +37,7 @@
             "price_delta_roi": [884, 493, 80, 42],
             "detail_wait": 1.0,
             "close_wait": 0.5,
+            "enable_price_scan": true,
             "threshold": 0.7
         },
         "next": []
