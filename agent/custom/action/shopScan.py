@@ -958,7 +958,7 @@ class ShopScan(CustomAction):
             "items": items,                     # 阶段 B1 结果（enable_price_scan 才有）
             "sold": sold,                       # 阶段 D 结果（卖出明细）
         }
-        self._save(payload)
+        # self._save(payload)
         sellable_n = sum(1 for it in items if it.get("sellable"))
         logger.info(
             f"[shopScan] [{tag}] 扫描完成 阶段A空栏位 x={empty_slots['empty_count']}/"
