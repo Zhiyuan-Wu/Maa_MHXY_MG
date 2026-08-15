@@ -1,11 +1,42 @@
 ---
 name: 5r-log-analysis
-description: 排查"梦幻西游五开"（agent/run_5r.py）运行日志的 SOP。当需要分析 debug/run_5r/*.log（Python 编排层）或 debug/debug/maafw*.log（MaaFw 原生层）来定位任务失败/超时/静默成功/on_error/自定义回调崩溃，或诊断"autolife 4h 假超时"时使用。
+description: 排查"梦幻西游五开"（agent/run_5r.py）运行日志的 SOP。当需要分析 debug/run_5r/*.log（Python 编排层）或 debug/debug/maafw*.log（MaaFw 原生层）来定位任务失败/超时/静默成功/on_error/自定义回调崩溃，或诊断"autolife 4h 假超时"时使用。排查完成后须归档：把 Mac 侧日志/on_error 拷到 debug/mac log/<YYYYMMDD>/ 并把报告写入该目录 report.md（见 §5.2）。
 ---
 
 # 5r 日志排查 SOP
 
 `agent/run_5r.py` 是五开编排（单进程、每账号独立 Resource、原生 pipeline + 墙钟超时）。日志分**两层**，排查时要分清看哪层。本 SOP 总结自 2026-07 的几次实战排查。
+
+## ⚠ 硬性规则（每次排查必须遵守，不可跳过）
+
+以下六条是用户反复强调的底线，违反任一条都算排查不到位：
+
+1. **三份报告全出 + 三份都必须以完整表格呈现**：耗时矩阵（报告一）、账号金币·银币变化量（报告二）、科举答题质量（报告三）三份缺一不可，且**每一份都必须以表格形式贴出，禁止用文字总结糊弄**：
+   - **报告一（耗时矩阵）**：必须贴出「行=任务、列=5 个号、单元格=耗时(秒)」的完整矩阵，`X`=墙钟超时、`*`=超基线、`—`=未跑到、`⚠`=异常短疑似假成功 全部标出，并把含异常标记的单元格在表下点名。禁止只说"都正常/某号慢"。
+   - **报告二（账号变化量）**：必须贴出每号「账号(port) / 上次金币 / 本次金币 / Δ金币 / 上次银币 / 本次银币 / Δ银币 / 本次时间」**全部 8 列**（§4 account 脚本输出原样贴）。禁止用"5 个号金币都小幅正"一句总结糊弄；负值/大额波动必须在表下逐号说明。
+   - **报告三（科举）**：形式门结果要给数字（门1/门2/门3 各几条）；逐题校验必须贴**错题清单表**（题干 / AI 错答 / 正解 / 依据 / 是否已改），无错也要明确写"0 错"。
+
+2. **科举知识性逐题校验是必做步骤，不要询问用户是否执行**：报告三除三道形式门外，**第四道"逐题知识性人工校验"强制必做**——当天有新入库题就必须逐题判 ✅/❌/⚠，错的给正解并改 cache。**禁止问"要不要我人工校验"——直接做，做完在报告里给错题清单 + 修正结果。** 详见 §3 报告三。
+
+3. **多个 job / 多次 run 必须全部给出结果**：当天或查询时段内有多个 job（如 155000 done + 195959 cancelled）时，**必须逐个 job 出三份报告**，不能只详报一个、略提另一个；cancelled / failed 的 job 也要说明跑到哪、为何中止（去 maafw 看最后状态）。
+
+4. **有异常（超时 / on_error / 异常耗时）必须定位根因到节点级**：看到 `!!! 超时`、异常短的"完成"、异常多的 on_error 截图时，**必须去原生日志追"卡在哪个节点"**——按号（端口 / Tx 线程）+ 时段筛 maafw bak，看该任务终态节点命中、OCR raw text、最后 sleep / 循环状态，给出"卡在节点 X，因为 Y"的结论，不能只报"某号某任务超时"了事。截图（timeout / on_error PNG）必看——用图像分析工具读"卡在哪一帧"。详见 §2 Step 4 + §4.1。
+
+5. **全队/组队任务必须核实"真完成"，不能只看编排日志的"完成"**：team 阶段（副本、抓鬼、组队任务）编排日志只报 `<<< ... 完成（用时 Ns）` + maafw 也常报 `Tasker.Task.Succeeded`，但**副本/抓鬼链路是已知⑫/⑬的假成功重灾区**（空节点 Succeeded）——编排说"完成"≠真打完。**每次排查必须对 team 阶段单独核实真完成**，在报告里给一张「team 阶段任务核实表」（步骤 / 耗时 / 编排状态 / 真实命中证据 / 真假），不能只抄编排的"全部完成"。
+   - **核实方法（节点级，必走）**：
+     1. 编排日志锁定 team 阶段每个步骤的**时间窗口**（`>>> 队长 fuben69new XX（≤Ns）` 到 `<<< ... 完成（用时 Ns）`）。
+     2. 找覆盖该时段的 maafw bak（bak 时间戳 = 上一份 log 滚动时刻，覆盖该时间戳之前的时段）。
+     3. 每个副本/步骤 post 时会拿到一个 **task_id**（`task start: [... "entry":"fuben69new" ... "task_id":<id>]`），5 本副本就是 5 个 task_id——**逐一追终态**，不能合在一起数。
+        > ⚠ **task_id 归属陷阱（08-15 实证）**：`reco hit [result.name=...]` 行里**不含 task_id 字段**（只有 `NextList.Starting` 的 details JSON 里带）——按 `"task_id":<id>` 字符串去 grep 命中行会得到 **0**，然后误判"全假"。**追终态（Succeeded/Failed 事件）可用 task_id，数命中请改用「时间窗 + 节点名」**：从编排日志拿每本的起止时刻，在该时间窗内 grep `reco hit [result.name=fuben69new-副本完成-退出]` 的时刻列表，5 本窗口各得 1 hit = 全真完成（08-15 两 job 即用此法核实 10/10）。
+     4. **判真假的两条硬证据，二选一即可**：
+        - **真完成标志节点命中**：如副本的 `fuben69new-副本完成-退出`、抓鬼的 `抓鬼一轮完成`（4 轮鬼应 hit 4 次）+ `捉鬼-结束`。5 本副本→完成退出节点应 hit **5 次**；<5 必有假成功。
+        - **进本+战斗命中**：`fuben69new-进入-XX-成功` / `副本内状态机` / `点击副本-开始战斗` / `战斗中-等待N秒`。真打完的副本这几项 >0；假成功那本**战斗命中 = 0**、且 trace 末尾是 `空节点` → `Task.Succeeded`。
+     5. **耗时是最强初筛**：team 阶段同类型步骤横向比，某本异常短（如同批副本 523/616/372/411s，唯独一本 44s）= 几乎必然假成功——但要**回 maafw 用上面的命中证据坐实**，不能只凭耗时下结论。
+     6. **看到 on_error 截图必须读画面**：假成功那一刻 maafw 会落一张 `save_on_error`（文件名 = 卡住的节点，如 `fuben69new-点击地图-百晓仙子.png`），用图像分析工具读"点击后画面切到了什么"——往往能直接看到根因（如点错相邻 NPC 弹出错误对话框）。
+   - **典型范式（08.13 实证，普通-1 假成功）**：5 本副本 `fuben69new-副本完成-退出` 只 hit 4 次（少 1）→ 锁定普通-1 task_id=200000037（耗时 44s 异常短）→ trace：`点击地图-百晓仙子`(click) → 22s 全 miss → `NODE_FAILED` → `空节点` → `Task.Succeeded`；战斗命中 = 0 → 假成功坐实。on_error 截图读画面：click 落点偏到相邻 NPC"乌巢禅师"、弹出错误对话框，"选择副本"面板永不出现。根因 = 该节点 next 缺 `[JumpBack]panduan_zhujiemian` 兜底（已知⑫）。
+   - **team 阶段步骤从编排日志识别**：grep `全队|team|副本|抓鬼|zhuogui|fuben|5R_duizhang|barrier 打开大地图|5本副本`，起止行夹出每步时间窗口。注意 team 阶段**只有队长在驱动**（队员跟随），所以节点命中按队长端口/Tx 归号即可。
+
+6. **排查完成后必须归档**：把 Mac 侧当天 `run_5r_*.log` + **过滤后的** `on_error/` 截图（只拷异常取证，设计内退出门/已知重复错误不拷，名单见 §5.2）拷到 Win 本地 `debug/mac log/<YYYYMMDD>/`，并把**当天的三份报告 + team 核实表 + 根因结论写成该目录下的 `report.md`**（当天多 job 时写一份 report.md、分章节逐 job 全覆盖）。归档命令与目录约定见 §5.2。不归档 = 排查未完成。
 
 ## 0. 日志在哪
 
@@ -17,36 +48,77 @@ description: 排查"梦幻西游五开"（agent/run_5r.py）运行日志的 SOP�
 
 > maafw.log 在 ~16MB 时轮转成 `maafw.bak.<时间戳>.log`。多 Tasker 并发时偶尔会轮转出 **5 份相同 bak**（日志轮转竞态，无害）。
 
-> **remote 模式（Mac cli_server 执行，8/6 起为常态）**：日志/截图全在 Mac（`100.116.176.34`，ssh 用户 `imac`，仓库 `/Users/imac/dev/Maa_MHXY_MG`），本地没有。流程：①curl cli_server 确认 job → ②ssh/scp 拉到本地 `debug/` → ③按下列 SOP 分析。
+> **remote 模式（Mac cli_server 执行，8/6 起为常态）**：日志/截图全在 Mac（`100.116.176.34`，ssh 用户 `imac`，仓库 `/Users/imac/dev/Maa_MHXY_MG`），本地没有。分析当天的先归档到 `debug/mac log/<日期>/`（§5.2，编排日志+过滤后 on_error 一起拉回）；要现查 maafw 原生层才 ssh。Mac 侧 `agent/data/account_info.log`（账号变化，报告二数据源）与 `agent/data/keju_ai_cache.json` 也在 Mac。
 > ```bash
 > curl -s http://100.116.176.34:5090/jobs    # job 列表 + exit（exit=0 ≠ 成功，见 ③）
 > curl -s http://100.116.176.34:5090/health  # current_job 是否还在
-> ssh imac@100.116.176.34 'ls -lt /Users/imac/dev/Maa_MHXY_MG/debug/run_5r/run_5r_<YYYYMMDD>_*.log | head'
-> scp imac@100.116.176.34:/Users/imac/dev/Maa_MHXY_MG/debug/run_5r/run_5r_<...>.log ./debug/run_5r/
-> # 截图（中文文件名：单引号包整个 remote spec，scp 认 UTF-8）
-> scp 'imac@100.116.176.34:/Users/imac/dev/Maa_MHXY_MG/debug/debug/timeout/<中文>.png' ./shot.png
 > ```
 > **坑**：`ssh mac 'grep 中文 file'` 远程 grep 中文 **0 命中**（locale 不通）——改用 `ssh mac 'python3' <<'PY' ... PY` 读文件（`repr`/`os.listdir` 输出避开终端 GBK）。详见 [[mac-5r-remote-logs-lookup]]。
 
 ## 1. 账号 / 实例对照表（排查必备）
 
-编排层日志里是角色名（队长/渣中/6130/缤纷/晚风）；原生层 + PowerShell 里是端口/MuMu 索引。对照（来自 `run_5r.py::ROLES`，端口约定 `16384+32*idx`）：
+编排层日志里是角色名（队长/渣中/6130/缤纷/晚风）；原生层 + PowerShell 里是端口/MuMu 索引。**team1（默认配置）**对照（来自 `run_5r.py::ROLES`，端口约定 `16384+32*idx`）：
 
 | 角色 | adb 端口 | MuMu idx |
 |---|---|---|
-| 缤纷 | 16448 | 2 |
+| 缤纷/欧阳 | 16448 | 2 |
 | 晚风 | 16480 | 3 |
 | 队长 | 16512 | 4 |
 | 6130 | 16544 | 5 |
 | 渣中 | 16576 | 6 |
 
+**team2（`--config team2`，08-15 起使用）**是另一组账号、另一组端口（16608–16736，**不满足 16384+32*idx 约定**）：
+
+| 角色 | adb 端口 |
+|---|---|
+| 队长 | 16608 |
+| 六仔 | 16640 |
+| 梦蝶 | 16672 |
+| 离歌 | 16704 |
+| 欢喜 | 16736 |
+
+> ⚠ **端口/角色永远从编排日志动态读**：连接行 `[N] <角色> 已连接 127.0.0.1:<port>`（每 job 开头 5 行）是唯一可靠来源——配置可换（team1/team2）、角色会改名、端口约定会破。§1 两张表只作速查，**写死端口或硬套 `16384+32*idx` 都会归错号**。
+>
 > **渣中（idx6）一贯最慢**——实例特性，不是 bug（每次排查都会看到它的 shimen/baotu/mijing 耗时偏高）。
 >
-> **角色名会变，脚本勿硬编码**：`run_5r.py::ROLES` 改名后（如 07.30 把 4 号位「缤纷」改成「欧阳」，端口 16448 / MuMu idx2 不变），编排日志的角色名随之改变。耗时矩阵脚本必须**从日志动态读 roles**（见 §4），写死 `['队长','渣中','6130','缤纷','晚风']` 会让改名号整列变 `-`，造成"该号一个任务都没跑"的误判。端口→MuMu idx 的 `16384+32*idx` 约定不变，原生层按**端口 / Tx 线程**归号最稳。
+> **角色名会变，脚本勿硬编码**：`run_5r.py::ROLES` 改名后（如 07.30 把 4 号位「缤纷」改成「欧阳」，端口 16448 / MuMu idx2 不变），编排日志的角色名随之改变。耗时矩阵脚本必须**从日志动态读 roles**（见 §4），写死 `['队长','渣中','6130','缤纷','晚风']` 会让改名号整列变 `-`，造成"该号一个任务都没跑"的误判。
+
+### 1.1 原生层 Tx/uuid → 角色归号（`[tag]` 显式打标，08-15 起）
+
+**maafw 原生日志里没有任何角色名**，5 个号按 `[Tx<tid>]` 线程交错。三个实测事实：①每条 `task start:` 行带 `uuid`（Tasker 实例指纹，5 号各一、全程不变）；②**Tx 线程号 per-uuid 全程稳定**（08-15 job2 全场 216 条 task start 各自 100% 落同一 Tx）；③uuid→角色原本只能靠"首批 start 提交时刻对齐"间接推断（脆弱）。
+
+**已修（run_5r `_RoleTagSink`）**：`connect_all` 每建好一个 tasker 就 `add_sink(_RoleTagSink(role, addr))`，该号**首个** `Tasker.Task.Starting` 事件在编排日志落一行显式标记（之后静默）：
+
+```
+[tag] 欢喜(127.0.0.1:16736) uuid=9fcb6c12df310cb3   # maafw 按 Tx/uuid 归号用
+```
+
+**排查用法**（08-15 之后的日志）：编排日志 grep `\[tag\]` 拿 5 行 uuid 表 → maafw 里 `task start: .*"uuid":"<uuid>"` 所在行的 `[TxNNNNN]` 即该号线程号 → 之后按 Tx 筛 reco hit / trace 全程有效。一行命令建表：
+
+```bash
+"$PY" -c "
+import re,sys,glob
+try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception: pass
+log=open(sys.argv[1],encoding='utf-8').read()
+uu2role={m[2]:m[0] for m in re.findall(r'\[tag\] (\S+?)\(\S+?\) uuid=(\w+)',log)}
+uu2tx={}
+for f in glob.glob('debug/debug/maafw*.log'):
+    for line in open(f,encoding='utf-8',errors='replace'):
+        m=re.search(r'\[Tx(\d+)\].*?task start: .*?\"uuid\":\"(\w+)\"',line)
+        if m and m.group(2) in uu2role and m.group(2) not in uu2tx: uu2tx[m.group(2)]=m.group(1)
+for u,r in uu2role.items(): print(f'{r:6s} uuid={u} Tx={uu2tx.get(u,\"?\")}')" debug/run_5r/run_5r_<YYYYMMDD>_*.log
+```
+
+> **08-15 及更早的日志没有 `[tag]` 行**——回溯用旧法：编排日志拿该号某独占任务的时间窗（如 solo 段 wabaotu），在 maafw 找该窗口 `task start entry=<任务>` 的 Tx/uuid，反查该 uuid 其它 task start 时刻对齐首批 start（每 20s 一个、按 ROLES 序）。
+>
+> **L3 自愈重建的 tasker**（`_reconnect`）会换新 uuid——若 job 中途某号重连过，其 `[tag]` 的 uuid 只覆盖重连前；重连后新 uuid 需按旧法（时间窗）补一次归号。
 
 ## 2. 排查流程（按顺序）
 
 ### Step 1 — 确认这次 run 的边界
+> 先 `curl :5090/jobs`（remote）或 `ls debug/run_5r/`（local）拉出当天 / 查询时段内**全部** job。**有几个 job 就按本 SOP 走几遍**（硬性规则 3）——cancelled / failed 也要查清跑到哪、为何中止，不能只详报 done 的那个。
+
 读编排日志头尾：`=== 日志写入 ... ===`（起点）、`=== 全部完成 ===`（正常终点）、`=== main 结束，TerminateProcess ... ===`（进程退出）。
 - **有 `=== 全部完成 ===`** → 5r 本体跑完了；若调度器仍报超时，跳到 [Step 6 autolife 专项](#step-6--autolife-4h-假超时专项)。
 - **没有** → 5r 中途崩/超时，继续 Step 2。
@@ -58,7 +130,7 @@ description: 排查"梦幻西游五开"（agent/run_5r.py）运行日志的 SOP�
    - **异常短**（如某任务 10~50s，明显短于同批其它号）= **疑似静默失败**（on_error→空节点 假成功，见已知问题 ③）。重点盯 `mijing_renwu`（曾出现缤纷 47s）。
    - **异常长/贴着超时**（如 `≤2400s` 的任务跑了 2300s+）= 可能卡循环/冲关（盯 `mijing`、`wabaotu`）。
    - 系统化做全 5 号 × 全任务横向对比 + 基线参照，见 [§3](#3-量化报告每次排查必出三份)。耗时矩阵只是其中一份——**每次排查必出的三份量化报告**（耗时矩阵+异常标记 / 账号金币·银币变化量 / 新入库 AI 答题质量）见 §3，务必**全部产出再下结论**。
-3. **全员完成校验**：最后一项（通常 `kejuxiangshi`）5 个号是否都 `<<< 完成`。缺谁谁就在那个任务或上一个出了问题。
+3. **全员完成校验**：SOLO 列表最后一个任务（当前是 `baitanchushou`；列表以编排日志「并行单人（每账号顺序跑 [...]」行为准）5 个号是否都 `<<< 完成`。缺谁谁就在那个任务或上一个出了问题。
 
 ### Step 3 — 原生层 on_error / 回调异常统计
 on_error 不一定致命（很多是设计内或自恢复），但要**按节点计数**看分布：
@@ -100,13 +172,15 @@ powershell.exe -NoProfile -Command "\$live=(Get-CimInstance Win32_Process).Proce
 
 ## 3. 量化报告（每次排查必出三份）
 
-排查不仅定位故障，还要量化"这轮到底跑得怎么样"。**每次排查必须产出以下三份报告并贴进结论**，缺一不可：
+排查不仅定位故障，还要量化"这轮到底跑得怎么样"。**每次排查必须产出以下三份报告并贴进结论，缺一不可；当天 / 时段内有多个 job 时，每个 job 各产一份**（硬性规则 3）：
 
 | 报告 | 回答的问题 | 命令 |
 |---|---|---|
 | 一：耗时矩阵 + 异常标记 | 每号每个任务多久？哪些偏离典型基线 / 超时？ | §4 矩阵脚本 |
 | 二：账号金币·银币变化量 | 这轮跑完，每号钱是涨是跌、涨跌多少？ | §4 account 脚本 |
-| 三：科举新入库答题质量 | keju_ai_cache.json 本次新存的 AI 答案有没有不在选项里 / 自相矛盾 / 与 tiku.txt 不符？ | §4 新题质量脚本 |
+| 三：科举答题质量（3 形式门 + **第 4 道知识性人工校验，均强制、不问用户**） | 形式门：answer∉options / 同题冲突 / 与 tiku 不符；第 4 道：逐题判知识对错，错的改 cache | §4 新题质量脚本 + §3 第四道 |
+
+> **SOLO 列表无 kejuxiangshi 的跑（08-15 起）**：报告三直接写"列表无 keju → 当日 0 新题，三门对象为空集，第四道 N/A"，**不要**为凑报告去翻旧日期。sanjieqiyuan 的答题走 reco_sjqy（题库+日志"匹配度：100"），可顺带在报告三提一句当日无错答。
 
 一键命令见 [§4](#4-诊断命令速查复制改日期即可)。
 
@@ -137,22 +211,30 @@ powershell.exe -NoProfile -Command "\$live=(Get-CimInstance Win32_Process).Proce
 
 | 任务 | 典型正常 | 留意线 | 备注 |
 |---|---|---|---|
-| shuangbei | 20–25s | >60s | 几乎恒定 |
-| fuli_qiandao | 30–50s | >120s | |
-| shimen_renwu | 250–430s | >600s / 贴 2400 | 07.24 全员超时 = UI 变更（见下实例） |
-| yunbiao_renwu2 | 90–360s | >1000s / 贴 2400 | ⚠ **"完成"≠跑满 3 镖**，必须按号校验 `点击押送普通镖_确定` 命中 = 每号 3（见 ⑩）。07.24 渣中 2352/晚风 2222（卡循环）；07.26 渣中/缤纷/6130 ~480–510s"完成"但 `确定×1` 假完成 |
-| baotu_renwu | 470–820s | >1000s | 波动较大 |
-| wabaotu_qingli | 30–570s | — | 取决于背包宝图数量 |
-| 打开大地图_69副本 | 7–25s | >60s | 纯导航 |
-| mijing_renwu | 1300–1700s | >2100 / 贴 2400 | 走关数决定；07.24 缤纷 2257 偏长 |
-| sanjieqiyuan | 85–110s | >200s | |
+| shuangbei | 20–33s | >60s | 几乎恒定 |
+| fuli_qiandao | 30–60s | >120s | 个别号 ~114s 仍正常（08-15 欧阳） |
+| shimen_renwu / **shimen_renwu_new** | 250–900s | >1000s / 贴 2400 | 08.15 起入口换 `shimen_renwu_new`（带主界面回退前置，⑰ 修后）；team1 全员 644–882s、team2 650–1016s 均真干活（1016s 已核 357 命中无 on_error）。<60s 仍按 ⑰ 判假 |
+| yunbiao_renwu2 | 90–580s | >1000s / 贴 2400 | ⚠ **"完成"≠跑满 3 镖**，必须按号校验 `点击押送普通镖_确定` 命中 = 每号 3（见 ⑩）。07.24 渣中 2352/晚风 2222（卡循环）；07.26 渣中/缤纷/6130 ~480–510s"完成"但 `确定×1` 假完成 |
+| baotu_renwu | 400–820s | >1000s | 波动较大 |
+| wabaotu_qingli | 30–570s | — | 取决于背包宝图数量；**<30s = 假成功（见 ⑲）** |
+| 打开大地图_69副本 (barrier) | 7–15s | >30s | 纯导航；29s+ 说明有一次传送 miss 重试（自愈，无害） |
+| mijing_renwu | 1024–1680s | >2100 / 贴 2400 | 走关数决定；07.24 缤纷 2257 偏长 |
+| sanjieqiyuan | 94–126s | >200s | |
 | huoyue_lingqu | 14–20s | >60s | 07.24 晚风 65 偏长 |
-| zhengli_baibao | 25–70s | >150s | |
-| jiayuan_zhengli | 60–70s | >150s | |
-| huoli | 45–55s | >120s | |
-| kejuxiangshi | 90–100s（**真答**）| >300s | ⚠ **~50s 往往=没答（假成功，见 ⑨）**，并非"答得快"；07.24 缤纷 620 = 题库/AI 卡题 |
+| zhengli_baibao | 58–139s | >200s | 08-15 实测比旧基线（25–70）长，新任务链含更多页 |
+| jiayuan_zhengli | 76–106s | >150s | 同上 |
+| huoli | 22–73s | >120s | 22–24s（无活力可领）与 45–73s（有）都正常 |
+| zhanghao_xinxi | 17–23s | >60s | |
+| jialan | 56–93s | >150s | |
+| baitanchushou | 72–140s | >240s | 摆摊扫描+上架（08-14 新增）；`出售阵法` on_error 是流程内出口 |
+| 5R_duiyuan_tuichuduiwu | 17–25s | >60s | 退队 |
+| kejuxiangshi | 90–100s（**真答**）| >300s | ⚠ **~50s 往往=没答（假成功，见 ⑨）**，并非"答得快"；07.24 缤纷 620 = 题库/AI 卡题。**08-15 起 SOLO 列表已移除 keju**——报告三按"列表无 keju → N/A"处理 |
 
-### 实例（07.24，秒，节选关键行）
+> **SOLO 任务列表本身会变**（08-15 已比 07 底多 `jialan`/`baitanchushou`、少 `kejuxiangshi`）——排查第一步先从编排日志「并行单人（每账号顺序跑 [...]」行读**当轮实际列表**，不要拿旧列表对照。耗时矩阵脚本已按日志动态收集任务行，天然适配。
+
+### 实例（异常样本精选，秒）
+
+**07.24（UI 变更 + 级联）**：
 
 | 任务 | 队长 | 渣中 | 6130 | 缤纷 | 晚风 |
 |---|---|---|---|---|---|
@@ -161,92 +243,51 @@ powershell.exe -NoProfile -Command "\$live=(Get-CimInstance Win32_Process).Proce
 | mijing | 1301 | X999 | 1626 | 2257⚠ | 1362 |
 | keju | 94 | — | 92 | 620⚠ | 95 |
 
-> 渣中 mijing 的 `X999` 是整轮预算压缩后的小上限（**非 mijing 本身卡**）——原生层显示它已推进到第 25 关、停止门命中×3，是 shimen 超时级联的受害者。这是「`≤Ns` 递减 + 后半段 `—`」组合判读的典型案例：先看哪个号后半段全 `—`，再回溯该号哪个任务贴上限吃掉了预算。
+> 渣中 mijing 的 `X999` 是整轮预算压缩后的小上限（**非 mijing 本身卡**）——「`≤Ns` 递减 + 后半段 `—`」组合：先看哪个号后半段全 `—`，再回溯哪个任务贴上限吃掉预算。
 
-### 实例（07.25，秒——全绿，07.24 的问题全部消失）
-
-| 任务 | 队长 | 渣中 | 6130 | 缤纷 | 晚风 |
-|---|---|---|---|---|---|
-| shimen | 209 | 362 | 243 | 337 | 239 |
-| yunbiao | 352 | 524 | 265 | 243 | 466 |
-| baotu | 564 | 677 | 639 | 884 | 542 |
-| mijing | 1352 | 1661 | 1644 | 1711 | 1154 |
-| keju | 50⚠ | 51⚠ | 52⚠ | 51⚠ | 51⚠ |
-
-- **shimen / yunbiao / mijing 全部回归正常区间**：07.24 的 shimen 全 X2400（UI 变更）、yunbiao 渣中 2352 / 晚风 2222（卡循环）、mijing 缤纷 2257（冲关）今天都没了。整跑 0 超时、0 回调崩溃。
-- **mijing 0 冲关 = 停止门修复见效**：`pipeline_override` 里 `海底秘境-指定关卡结束任务.expected` 已由 `["第25关"]` 扩成 `["第25关"…"第30关"]`，结局 = 4×第25关停 + 1×shibai（晚风 1154s 失败退，合法出口）。**这是 07.24 已知④的直接修复证据。**
-- **keju 全员 ~50s ⚠ 但要警惕**：50s **不是"答得快"，是没答**——全员走 `向上滑动到顶端` 假成功出口，见 §5 ⑨。
-- **zhuogui「方案二」限轮器实跑验证通过**：fuben115(+2轮鬼) 阶段 `捉鬼-fuben桥接`→`抓鬼轮次计算-max`(=max_hit)→`捉鬼-结束` 整链各命中 1 次，全日志 0 处旧节点名（`抓鬼轮次计算-max-fuben`/`捉鬼-fuben结束`）。
-
-### 实例（08.06，秒——副本后半 + 连锁假成功 + bangpai 爆炸）
+**08.06（⑬–⑯ 四类新信号集中爆发）**：
 
 | 任务 | 队长 | 渣中 | 6130 | 欧阳 | 晚风 |
 |---|---|---|---|---|---|
 | fuben69new(5本) | 506/541/362/**34⚠**/**34⚠** | (队员跟随队长) | | | |
 | zhuogui(4轮) | **31⚠** | | | | |
 | bangpai | 1494 | X2400 | X2400 | 2226 | X2400 |
-| shimen | 833 | 739 | X2400 | 1088 | 421 |
 | wabaotu | 625 | 501 | 392 | **X2400** | 397 |
 | mijing | 1401 | 1667 | X预算 | **41⚠** | 1156 |
 | 欧阳后续7项 | | | | sanjie/huoyue/zhengli/jiayuan/huoli/zhanghao **全 41⚠** | |
 
-> 8/6 集中爆发的**四类新信号**（均见 §5 ⑬–⑯）：
-> - **副本后几本骤降到 30s 级**（34/34s）+ 捉鬼 31s = 连续进本 UI 时序假完成（⑬，ClickKey 小地图键被吞）。
-> - **某号超时后整串恒定 ~41s**（欧阳 wabaotu 超时→后续 7 任务全 41s）= 连锁假完成（⑮，前一任务卡死没回主界面，污染后续入口）。
-> - **bangpai 全员 1500–2400s** = 战斗爆炸 + 寻路异常（⑯）。
-> - **shimen 单号超时**（6130）= 装备上交验证码弹窗（⑭，随机触发）。
-> - **已修**：⑬⑮ 用 `run_5r` 的 `_barrier_reset`（任务间 sleep5+打开大地图）+ `run_task.sentinel`（done 后校验主界面）堵（commit `93badad`/`a3add01`）；⑭⑯ 待修。
+> 副本后几本骤降 30s 级 = ⑬ 连续进本 UI 时序假完成；某号超时后整串恒定 ~41s = ⑮ 连锁假完成；bangpai 全员 1500–2400s = ⑯；shimen 单号超时 = ⑭ 验证码弹窗。⑬⑮ 已修（`_barrier_reset` + sentinel，commit `93badad`/`a3add01`）；⑭⑯ 待修。
+
+**07.25 / 08.15 = 全绿样板**（详见 `debug/mac log/` 对应日期 report.md）——判读时拿它们当健康基线。
 
 ### 报告二：账号金币·银币变化量
+
+> ⚠ **必须贴完整表格（每号 6 列：上次金币 / 本次金币 / Δ金币 / 上次银币 / 本次银币 / Δ银币），禁止用一句"都小幅正"总结糊弄**（硬性规则 1）。§4 account 脚本输出原样贴进结论。
 
 `agent/data/account_info.log` 每个 `zhanghao_xinxi` 节点写一行（每号每次 run 一条）：`[时间] 账号: 127.0.0.1:<port> | 金币: <n> | 银币: <n>`。按端口取**最近两条**算 Δ，即"本次 run 相对上一次 run"的净变化（本跑产出 + 期间消耗/收入）。判读：
 
 - **金币 Δ 正常小幅为正**：日常产出 + 押镖/活跃度收入，扣挖宝/修炼等消耗；银币通常缓涨。
 - **Δ 异常**：暴负 → 大额消耗（买道具/点技能）；为 0 → zhanghao_xinxi 的 OCR 没刷新/读到旧值（留意已知 ⑪ 复发）；暴正 → 上次没跑、跨多天累计。
 - **任一行出现 `账号ID: (未知账号)`**（旧格式）→ 已知 ⑪ 复发，停；正常应为 `账号: 127.0.0.1:<port>`（新格式，07.27 起）。
+- **银币大负的归因排除法（08-15 实战）**：某号银币 Δ 暴负（如 -700万/-1161万）时，按序排除：①`debug/custom/<日期>.log` 里 grep 该号 `[shopScan] 阶段D 卖出`——摆摊卖出是**收入**（+），不能解释负值，但顺手拿到每号卖出件数；②该号各任务耗时/命中是否正常（正常→run 本身没出事）；③剩余解释=run 间隔期间（上次 zhanghao_xinxi 到本次之间，常跨一天）游戏内手动消费或上架费——**报告里标注"待用户确认"，不要硬安在 5r 头上**。
+- **account_info.log 在 Mac 侧**（remote 模式 zhanghao_xinxi 由 Mac 子进程写）——本地 `agent/data/account_info.log` 是旧的（08-13 止），跑 §4 account 脚本前先 ssh 拉 Mac 的。
 
 ### 报告三：科举新入库答题质量
 
-> ⚠ 5r 科举答题链路要认准（用户专门纠正过，别搞混）：
-> - **`agent/data/keju_ai_cache.json`** = **5r 科举实际使用的题库**（本报告对象）。keju 答题节点 `活动-科举乡试-开始答题API` → `custom_recognition:"AIAnswer"` → `AIAnswer.py` **只加载这一个文件**：`_cache_lookup` 先查、命中即点；miss 才调智谱 AI，答完 `_cache_store` 存回。名义是"AI 缓存"，**事实上就是科举运行时题库**，每跑一次增量。
-> - `agent/custom/recognition/tiku.txt` = `searchAnswer.py` 加载的题库，给**别的任务**用（**不是** keju 的 `开始答题API` 节点），这里仅作交叉参照。
-> - `agent/custom/recognition/question_bank.json` = **遗留未接入文件**（全仓库 `grep question_bank\.json` 无代码引用），排查时**忽略它，别挂错**。
+> **08-15 起 SOLO 列表已移除 kejuxiangshi**——当天列表无 keju 时本报告直接写"0 新题，三门空集，第四道 N/A"（见 §3 开头注）。以下内容在 keju 回归列表或回溯历史日期（≤08-14）时使用。
 
-结构 `{题干key: {answer, options{A,B,C,D}, question, ts}}`，`ts` 形如 `2026-07-30 17:43:28`。**"新入库"按 `ts[:10] == 当天日期` 界定**（最准；也可 `git diff HEAD` 交叉印证）。三道质量门（脚本见 §4）：
+> ⚠ 题库链路认准（用户专门纠正过，别搞混）：**`agent/data/keju_ai_cache.json`（Mac 侧）= 5r 科举实际使用的运行时题库**（`开始答题API` → `AIAnswer.py` 只加载它，命中即点、miss 调 AI 后存回）；`tiku.txt` 是别的任务（三界等）用的，仅作交叉参照；`question_bank.json` 是遗留未接入文件，忽略。结构 `{题干key: {answer, options, question, ts}}`，"新入库"按 `ts[:10]==当天` 界定。
 
-1. **answer∉options（硬错误）**：AI 幻觉，答案不在四选项里 → 该题必错、必报（pipeline 命中 cache 即点选，会直接丢分）。
-2. **同题多答案冲突**：题干归一化（去标点/空格）后，全量 cache 里同一题出现多个不同 answer → AI 两次答得不一致，存疑。
-3. **与 `tiku.txt` 交叉**：tiku 已收录该题的标准答案，但 AI 答案不符 → AI 可能答错（或 tiku 用的是另一可接受答案，结合 options 人工确认）。
+**四道质量门**（前三道脚本 = §4 新题质量脚本、第四道人工，**均强制**，见硬性规则 2）：
 
-**三门全 0 = 本次新题干净**；任一非 0 → 列明细人工复核。门 1 硬错误**只能删该 cache 条让其下次重答**（keju 不读 tiku，回填 tiku 对它无效）。
+1. **answer∉options（硬错误）**：AI 幻觉 → 必错必报；只能删该 cache 条重答（回填 tiku 无效）。
+2. **同题多答案冲突**（题干归一化后全量查）。
+3. **与 tiku.txt 交叉不符**。
+4. **知识性逐题校验**：三门只查形式、**抓不出知识性错答**——deepseek 会把事实记错且稳定重复（08.10 实证：80 题三门全过，人工查出 8 错，删了重答还错）。**只能人工判 ✅/❌/⚠ + 直接改 cache**，禁止问用户"要不要校验"。存疑题 web 搜（`mcp__web-search-prime` location=cn，优先教材/百科）；仍存学术争议则保留 AI 答案+备注。
 
-> ⚠ **但三门只能查"形式"，查不出"答案本身对不对"——必须再做第四道：知识性人工逐题校验**。三门（answer∈options / 无冲突 / 与 tiku 符）**抓不出知识性错答**。08.10 实证：两次 run 80 题三门全过，逐题人工仍查出 **8 道知识性错答**（deepseek 把事实记错，非幻觉、非歧义，删了重答还会错）。
+**修正方式**：直接编辑 `keju_ai_cache.json` 的 answer 为正确答案**文本**（cache 存文本，不是字母）。**批量改的坑**：短关键词匹配会误伤语义相近旧题（08.10 "百戏之师" 同键命中两题、把本来正确的旧题改成不是）；必须用完整 question 文本匹配 + 改完逐条 diff 核对 + 多改即回滚。
 
-#### 第四道：知识性逐题校验（人工，非脚本）
-
-**为什么不能省**：门 1 只保证 answer∈options（不丢分于"点不到的选项"），**不保证 answer 是对的**。deepseek 会把事实记错（如"亚洲耕地最大=中国"），这种错三门全过、且稳定重复——删了重答还是错。**只能人工判 + 直接改 cache**。
-
-**方法**：
-1. 用 §4 脚本导出当天新题清单（序号 + 题 + 四选项 + AI 答案 + ts）；附 cache 命中率（`debug/custom/<日期>.log` 数 `缓存精确命中`/`缓存未命中，调用AI`/`AI返回答案`，后者=总答题=5 号×乡试 10 题；模糊命中应为 0，已禁用）。
-2. 逐题用领域知识判：✅对 / ❌错 / ⚠存疑；错的给正解；存疑的 web 搜（`mcp__web-search-prime` location=cn，梦幻科举是通用常识题，cn 搜索能定权威答案；优先教材标准/百科，警惕劣质题库答案）。
-3. 存疑题若搜索后仍学术争议（如"美"字 羊大为美 vs 羊人为美），**保守保留 AI 答案 + 备注**，不强行改。
-
-**08.10 错例（8 道知识性错答，三门全过）**——deepseek 高频踩坑点，复跑还会错，**遇到直接改 cache**：
-
-| 题型 | 题干（简） | AI 错答 | 正解 | 错因 |
-|---|---|---|---|---|
-| 地理事实 | 亚洲耕地面积最大是中国 | 是 | **不是（印度）** | 印度耕地世界第一 |
-| 地理事实 | 世界最大的海湾 | 几内亚湾 | **孟加拉湾** | 孟加拉湾 217 万 km² 第一 |
-| 常识计算 | 退避三舍=三十里 | 是 | **不是（九十里）** | 一舍三十里×3 |
-| 字词本义 | 高屋建瓴的"瓴"=屋檐 | 是 | **不是（盛水瓶）** | 瓴=瓶，建=倾倒 |
-| 文化归属 | 京剧是"百戏之师" | 是 | **不是（昆曲）** | 百戏之祖/师=昆曲 |
-| 姓氏常识 | 百家姓无肖姓 | 不是 | **是的（有萧无肖）** | 肖是二简字后从萧分 |
-| 地理事实 | 不受寒潮影响的地区 | 海南岛 | **雅鲁藏布江地区** | 青藏高原挡寒潮，海南岛会受 |
-| 地理事实 | 横跨两大洲首都在西半球 | 土耳其 | **美国** | 美跨北美+大洋洲，华盛顿西半球 |
-
-**修正方式**：直接编辑 `keju_ai_cache.json` 的 answer 字段为正确答案**文本**（cache 存文本、lookup 时 `_find_letter` 转字母，**不是 letter**），比"删条重答"稳——deepseek 同题会重复犯错。改完**逐条核对**（python 重读 + 断言 answer==期望）。
-
-**批量改的坑（08.10 实战踩过）**：用**短关键词**匹配 question 会**误伤语义相近的旧题**。例：关键词"百戏之师"同时命中今天新题「**京剧**被称为百戏之师？」（改 是→不是 ✓）和 cache 旧题「**下面哪个剧种**被称为百戏之师？」（选项是剧种名、原答"昆曲"本就正确，被误改成"不是"，而"不是"根本不是该题选项 ❌）。**对策**：用**完整 question 文本**或足够长的唯一子串匹配；改完**逐条打印 diff 核对**；多改了立即回滚。
+**08.10 错例（deepseek 高频知识性错点，遇到直接改 cache）**：亚洲耕地最大=印度（非中国）；最大海湾=孟加拉湾（非几内亚）；退避三舍=九十里（一舍三十里×3）；高屋建瓴"瓴"=盛水瓶（非屋檐）；"百戏之师"=昆曲（非京剧）；百家姓有萧无肖（肖是二简字后分出）；不受寒潮影响=雅鲁藏布江地区（非海南岛）；横跨两洲首都西半球=美国（非土耳其）。
 
 ## 4. 诊断命令速查（复制改日期即可）
 
@@ -304,10 +345,10 @@ if not roles:   # 兜底：从完成行抓角色名
         if m and m.group(1) not in roles: roles.append(m.group(1))
     roles=roles[:5] or ['?']
 # 典型基线「留意线」(秒)，超过即标 *；未列=波动大不判绝对值（如 wabaotu_qingli）
-LIM={'shuangbei':60,'fuli_qiandao':120,'shimen_renwu':600,'yunbiao_renwu2':1000,
-     'baotu_renwu':1000,'打开大地图_69副本':60,'mijing_renwu':2100,'sanjieqiyuan':200,
-     'huoyue_lingqu':60,'zhengli_baibao':150,'jiayuan_zhengli':150,'huoli':120,
-     'kejuxiangshi':300,'zhanghao_xinxi':60}
+LIM={'shuangbei':60,'fuli_qiandao':120,'shimen_renwu':900,'shimen_renwu_new':1000,
+     'yunbiao_renwu2':1000,'baotu_renwu':1000,'打开大地图_69副本':30,'mijing_renwu':2100,
+     'sanjieqiyuan':200,'zhengli_baibao':200,'jiayuan_zhengli':150,'huoli':120,
+     'zhanghao_xinxi':60,'jialan':150,'baitanchushou':240,'kejuxiangshi':300}
 print('%-16s'%'任务'+''.join('%-9s'%r for r in roles))
 for t in order:
     cells=[]
@@ -329,7 +370,9 @@ print('(* = 超过典型基线留意线，X = 墙钟超时；异常短=疑似假
 > ```
 
 ```bash
-# 报告二：账号金币/银币变化量（每端口取最近两条算 Δ = 本次 − 上次）
+# 报告二：账号金币/银币变化量（⚠ account_info.log 在 Mac 侧——remote 模式由 Mac 子进程写，
+#   本地文件是旧的。先 ssh 拉回: scp imac@100.116.176.34:/Users/imac/dev/Maa_MHXY_MG/agent/data/account_info.log ./agent/data/）
+# （每端口取最近两条算 Δ = 本次 − 上次）
 "$PY" -c "
 import re,sys,collections
 try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -352,7 +395,8 @@ print('Δ = 本次(最近一条) − 上次；负=净消耗。任一行含 (未�
 ```
 
 ```bash
-# 报告三：科举题库(keju_ai_cache.json)新入库答题质量（默认查当天 ts；传第 2 参指定日期如 2026-07-30）
+# 报告三：科举题库(keju_ai_cache.json)新入库答题质量（⚠ 文件在 Mac 侧，先 scp 拉回；
+#   当天 SOLO 列表无 kejuxiangshi 时跳过本脚本。默认查当天 ts；传第 2 参指定日期如 2026-07-30）
 "$PY" -c "
 import json,sys,re,collections,ast
 try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
@@ -413,6 +457,29 @@ for h in seg[:12]+seg[-15:]: print('L%d %s %s'%h)  # 头12/尾15 看入口与终
 #   .bak 选哪份：maafw.bak.<时间戳> 的时间戳=滚动时刻（上一份 log 结束写入），
 #   覆盖该时间戳之前的时段。例：18.00.27 的 bak 含 17:25–18:00（副本+队长 bangpai）。
 
+# D) 【08-15 实战补充】maafw 时间覆盖自检——别猜 bak 覆盖哪段，先读首行时间戳。
+#    maafw.log 的起点=最后一次滚动时刻（不是任务时刻！），21:07:02 滚动的 log
+#    首行就是 21:07:02，拿它查 21:07:12 的窗口必然 0 行（白白怀疑设备断连）。
+"$PY" -c "
+f=open(r'debug/debug/maafw.log',encoding='utf-8',errors='replace')
+print('first:',f.readline()[:40])
+f.seek(0,2); sz=f.tell(); f.seek(max(0,sz-3000))
+print('tail :',f.read().splitlines()[-1][:40])
+"
+#    然后按 [起点,终点] 选 bak 链。选错 bak 的典型症状：目标窗口内 0 行/0 命中。
+
+# E) 【08-15 实战补充】单任务假成功三步定位法（编排窗口 → task start 拿 Tx → 该 Tx 的命中序列）：
+#    ① 编排日志夹出可疑窗口（如 21:07:12–21:07:40）；② 在覆盖窗口的 bak 里找
+#    'task start' + 'entry=<任务名>' 拿该任务的 Tx 线程号；③ 筛 [TxNNNNN] 打印
+#    命中序列 + save_on_error + Task.Succeeded——假成功的形态一目了然：
+#    入口 hit → (DirectHit 也 hit) → N×20s 全 miss → on_error → 空节点 → Succeeded。
+#    同时把该窗口 NextList.Starting 的 details JSON 里 "list":[...] 打出来，
+#    即可看到"卡住时它在等什么候选"（如 wabaotu 在等 [打开背包, 兜底点击图标]，
+#    而画面停在大地图两者必 miss —— ⑲）。
+#    注意行内时间戳格式是 [2026-08-15 21:07:19.637]，匹配用
+#    re.match(r'\[2026-08-15 (\d{2}:\d{2}:\d{2})', line) 取 group(1) 比窗口，
+#    别用 line[:26] 之类的切片（08-15 踩过：maafw.log 行首是 '['，切片对不上 0 命中）。
+
 # C) 截图视觉分析：timeout/on_error 截图用图像分析工具读"卡在哪一帧"
 #    prompt 要点：当前界面（主界面/战斗/挖宝/弹窗）、可见中文、角色是否卡异常状态、为何超时。
 #    例：8/6 shimen 截图→"装备上交"弹窗+验证码（⑭）；wabaotu→"挖宝中"没回主界面（⑮）。
@@ -442,6 +509,7 @@ for h in seg[:12]+seg[-15:]: print('L%d %s %s'%h)  # 头12/尾15 看入口与终
 | ⑯ | bangpai_renwu 全员 1500–2400s（远超 typical）；maafw 队长 `帮派任务单次的链`×46 + `战斗-等待20秒`×60；部分账号超时截图停**长安城"自动寻路中(藏宝图)"**（没进帮派） | **帮派战斗爆炸 + 寻路异常** | ①单次链未收敛/完成判断不灵，反复接-打-提交；②部分账号寻路目标异常（藏宝图而非帮派 NPC）。**堵法**：待定（查单次链完成判断、寻路目标） |
 | ⑰ | shimen 某号 30~40s"完成"（08.03 全员 35s / 08.07 队长 34s+渣中 33s，正常应 250~670s）；maafw trace `师门任务开始-v2` next 候选（OCR"师门任务"）全 miss→on_error→空节点→Task.Succeeded；**on_error 截图显示角色卡在大地图**（南赡部洲、任务面板折叠，OCR"师门任务"必然 miss） | **shimen 入口缺主界面前置 + barrier 传送留大地图** | `师门任务开始-v2` **无 recognition 永远命中**，next 直接找师门任务；barrier（`打开大地图_69副本`→`传送长安城_69副本` Click tab + post_delay 仅 1000ms）传送不稳定把角色留大地图时，入口 OCR 全 miss。**其余 8 个 SOLO entry 入口均有主界面图标前置**（TM `chenghao/jiahao/baoguo`，大地图上 miss→`[JumpBack]panduan_zhujiemian` 兜底回主界面），容忍了 barrier 传送不稳定，**唯 shimen 缺前置**。判别：shimen 用时 <60s + on_error 截图非主界面。**堵法（已实施 20856c1）**：`师门任务开始-v2` next 开头加 `[JumpBack]panduan_zhujiemian_ks`（仿 bangpai 入口：inverse+TM 主界面图标+ClickKey back，不在主界面就按 back 关大地图，JumpBack 回入口重扫）。注意 `_sentinel_main`（主界面模板）抓不住此假成功——角色停在大地图时 `zai_zhujiemian` 模板仍宽松命中 |
 | ⑱ | 副本进入"失败重试"基于 stale 帧误点；maafw trace `fuben69new-进入-侠士-1-失败重试` HIT（OCR"进入" box[351,579]）后 action Click[360,602]（左下角"进入"按钮位），但同窗口下一帧 OCR 已是因缘绘——**队员配对完毕后会短暂回"进入"界面再切因缘绘**，此间隙命中失败重试，action Click 时画面已切因缘绘，**误点因缘绘界面左下角** | **recognition↔action 时间差 + 画面切换（stale 帧）** | MaaFw 节点生命周期：识别（帧 A）→ pre_delay → action（帧 B，画面可能已切）。配对间隙识别到"进入"按钮（帧 A=进入界面），Click 时画面已切因缘绘（帧 B）→ 点到因缘绘左下角无关区域。判别：进本点击坐标落在"进入"按钮 roi 但该次点击后副本未进、反而在因缘绘界面产生异常点击副作用。**堵法（已实施 052bb5f）**：`失败重试` 改**过渡节点**（OCR"进入" + DoNothing + post_delay 1000），next 指向 `[失败重试-确认, 空节点]`；新增 `-确认`（再 OCR"进入" + Click）= **double check**：第二次识别（≥1s 后，stale 帧已过）命中才点（真还在进入界面），miss（已切因缘绘）走空节点不点，子链结束 JumpBack 回侠士-1。**通用模式**：重要点击若依赖易变画面，拆"识别过渡→再识别点击"两节点，两次都命中才点；`[确认, 空节点]` 结构让 miss 时优雅跳过而非误点 |
+| ⑲ | wabaotu 某号 ~28s"完成"（正常 263–818s）；maafw trace：`wabaotu_qingli`→`清理主界面使用-关闭完成`→`wabaotu`(DirectHit 命中) → 该节点 next `[挖宝图-打开背包-成功-并向上滑动到顶端, [JumpBack]背包界面-按键打开失败-点击图标]` 连续 ~22s 全 miss → `on_error 落图 wabaotu.png` → `空节点` → `Task.Succeeded`；**on_error 截图显示角色卡在南赡部洲大地图**（非主界面，背包打不开、图标形态不同） | **wabaotu 入口缺主界面前置（⑰ 同族）** | barrier「打开大地图」传送不稳定把角色留在大地图时，`wabaotu`（DirectHit，永远命中）照样进入，但后续"打开背包"在大地图必然 miss，唯一兜底 `[JumpBack]背包界面-按键打开失败-点击图标` 也 miss（大地图上无背包图标）→ 干等超时 → 空节点假成功，**背包宝图 0 张挖**。08-15 job2 离歌 28s 实证（job1 同任务全员正常 → 偶发，barrier 时序决定）。**堵法**：`wabaotu` 节点 next 开头加 `[JumpBack]panduan_zhujiemian_ks`（⑰ 同款：inverse 主界面检查 + ClickKey back 关大地图回主界面），或显式 `on_error:[panduan_zhujiemian]`。判别：wabaotu 用时 <30s + on_error 截图 = 大地图 |
 
 ### 5.1 每轮"必触发"的 on_error（看到别慌，逐个对号）
 
@@ -456,17 +524,83 @@ for h in seg[:12]+seg[-15:]: print('L%d %s %s'%h)  # 头12/尾15 看入口与终
 
 > 口诀：**「每号恰好 1 张 + 该任务耗时正常」通常是设计内出口；但耗时异常短（<60s 的答题/挖图类）必查节点命中，提防空节点假成功。**
 
+### 5.2 排查后归档（硬性规则 6 的落地）
+
+每次排查完（remote 模式日志宿主在 Mac），把当天日志拷到 Win 本地统一归档 + 写报告。目录约定（已建，见 `debug/mac log/README.md` 索引）：
+
+```
+debug/mac log/
+├── README.md                # 归档索引（日期/文件数/有无 report/当天要事）
+└── <YYYYMMDD>/
+    ├── run_5r_<YYYYMMDD>_*.log   # 当天全部编排日志
+    ├── on_error/                 # 当天【过滤后】的 on_error 截图（只留异常取证）
+    └── report.md                 # 当天分析报告
+```
+
+**report.md 必含**（即硬性规则 1/3/5 的产出落盘）：每个 job 一章的三份量化报告（耗时矩阵/账号变化/科举）+ team 阶段核实表 + 异常根因（节点级 trace + 截图画面结论）+ on_error 分布表 + 结论与待办。当天多 job 写一份 report.md 分章节，不拆多份。
+
+**⚠ on_error 只归档"异常取证"截图——设计内退出门 / 已知重复错误不拷贝**（08-15 用户要求；当日实测过滤后 44→4 张，整档 710MB→52MB）。过滤 = 不在下列 ROUTINE 名单内的才拷：
+
+```python
+ROUTINE = {  # 设计内出口/瞬态自恢复/已知问题截图，report 里计数即可、不留图
+  '活动-运镖-开始-点击参加',            # ① 运镖 3 镖跑完的设计内出口
+  '宝图完成判断-再次检查','藏宝图-背包使用',  # 空背包复查的设计内出口
+  '出售阵法',                            # baitanchushou 摆摊流程内出口
+  '师门任务-任务分支-装备提交确认-输入验证码',  # ⑭ 已知验证码弹窗（同日大量重复，留 1 张也只在 report 引用）
+  '点击打工','队长踢人-选人','点击副本-开始战斗',  # 瞬态自恢复
+}
+# 注意：过滤是"拷贝时排除"，不是"分析时忽略"——report 的 on_error 分布表仍要给 ROUTINE 节点的计数。
+```
+
+**拷贝命令**（08-15 实战验证；on_error 在 Mac 侧先过滤再传，全量日志仍留 Mac 原地）：
+
+```bash
+# 1) 编排日志：scp 通配（文件名纯 ASCII，直接拷）
+scp -q "imac@100.116.176.34:/Users/imac/dev/Maa_MHXY_MG/debug/run_5r/run_5r_<YYYYMMDD>_*.log" "debug/mac log/<YYYYMMDD>/"
+
+# 2) on_error（中文文件名）：Mac 侧 python 过滤 ROUTINE 后 tar 流，本地解包
+PY="C:/Users/zhiyuan/AppData/Local/Programs/Python/Python313/python.exe"
+"$PY" - <<'PY'
+import subprocess,io,tarfile
+d='20260815'; datestr=f'2026.{d[4:6]}.{d[6:]}'          # 改日期
+ROUTINE={'活动-运镖-开始-点击参加','宝图完成判断-再次检查','藏宝图-背包使用',
+         '出售阵法','师门任务-任务分支-装备提交确认-输入验证码',
+         '点击打工','队长踢人-选人','点击副本-开始战斗'}
+# 远程 python 列文件（中文文件名经 ssh 传输要用 python，grep 中文 0 命中）
+remote=(f"python3 - <<'RPY'\n"
+        f"import os\n"
+        f"oe='/Users/imac/dev/Maa_MHXY_MG/debug/debug/on_error'\n"
+        f"R={ROUTINE!r}\n"
+        f"fs=[f for f in sorted(os.listdir(oe)) if f.startswith({datestr!r}) and f.split('_',1)[1].rsplit('.',1)[0] not in R]\n"
+        f"print('\\n'.join(fs))\n"
+        f"RPY")
+p=subprocess.run(['ssh','imac@100.116.176.34',remote],capture_output=True)
+keep=[x for x in p.stdout.decode().splitlines() if x]
+remote2=(f"cd /Users/imac/dev/Maa_MHXY_MG/debug/debug/on_error && "
+         f"printf '%s\\n' " + ' '.join(repr(f).replace("'",'\\"') for f in keep) + " | tar czf - -T /dev/stdin")
+p=subprocess.run(['ssh','imac@100.116.176.34',remote2],capture_output=True)
+tf=tarfile.open(fileobj=io.BytesIO(p.stdout))
+for m in tf.getmembers():
+    if m.isfile():
+        open(rf'debug\mac log\{d}\on_error\{m.name}','wb').write(tf.extractfile(m).read())
+print('copied', len(keep))
+PY
+```
+
+**不归档 maafw 原生日志**（16MB+ 轮转、总量 GB 级）——需要时 ssh 到 Mac 现查；report.md 里注明关键 trace 所在的 bak 文件名 + 时间窗，便于回查。
+
 ## 6. 关联
 
-- **记忆**（`~/.claude/projects/.../memory/`）：`maafw-ocr-expected-and-only-rec`（OCR expected 子串匹配 + only_rec 乱码）、`on-error-kongjiedian-false-success`（假成功 + sentinel）、`maafw-resource-not-thread-safe`（每账号独立 Resource）、`maa-pipeline-task-entry-pattern`（next/JumpBack 状态机）。
+- **记忆**（`~/.claude/projects/.../memory/`）：`maafw-ocr-expected-and-only-rec`、`on-error-kongjiedian-false-success`、`maafw-resource-not-thread-safe`、`maa-pipeline-task-entry-pattern`、`mac-5r-remote-logs-lookup`、`custom-recognition-singleton-shared-5r`。
 - **项目文档**：`CLAUDE.md`（pipeline 节点/next/on_error 机制）、`docs/description/状态机设计模式.md`。
-- **相关代码**：`agent/run_5r.py`（编排 + ROLES + TIMEOUTS）、`agent/custom/recognition/{ocrNum.py,searchAnswer.py,AIAnswer.py,question_bank.json,tiku.txt}`（活力识别 + 科举题库 question_bank + 三界/科举题库 tiku + AI 缓存 keju_ai_cache）、`assets/resource/base/pipeline/{fuben115,mijing_renwu,yunbiao_renwu2,huoli}.json`、`assets/resource/base/default_pipeline.json`（全局 on_error→空节点）。
+- **相关代码**：`agent/run_5r.py`（编排 + ROLES + TIMEOUTS + `_RoleTagSink` 角色打标）、`agent/custom/recognition/{AIAnswer.py,tiku.txt,searchAnswer.py}`、`agent/custom/action/{logOcr.py,shopScan.py}`、`assets/resource/base/pipeline/`（各任务 JSON）、`assets/resource/base/default_pipeline.json`（全局 on_error→空节点）。
+- **归档**：`debug/mac log/<日期>/report.md`（历史报告，`README.md` 为索引）。
 
 ## 7. 排查心法
 
 1. **先分清层**：编排日志说"谁/哪个任务/多久"，原生日志说"为什么"。先编排定位、再原生取证。
 2. **先判生死**：有 `=== 全部完成 ===` → 5r 没死，问题在调度层或某任务的"假成功"；没有 → 5r 中途崩/超时。
 3. **耗时是最强信号**：同批 5 个号横向比，异常短=静默失败，异常长=卡循环/冲关。
-4. **on_error 不等于失败**：很多是设计内出口（运镖）或自恢复（秘境瞬态），按节点计数 + 对照已知表再下结论。
-5. **maafw 日志巨大**：永远 grep，永不整读；用 task_id/uuid 把 5 路交错线程拆开。
+4. **on_error 不等于失败**：很多是设计内出口（运镖）或自恢复（秘境瞬态），按节点计数 + 对照已知表再下结论；耗时短只是信号，**节点命中才是证据**。
+5. **maafw 日志巨大**：永远 grep，永不整读；先 grep `\[tag\]`（编排日志）建 Tx→角色 表（§1.1），再按 Tx/时间窗把 5 路交错线程拆开。
 6. **"完成却超时"先查调度**：5r 正常退 + autolife 超时 = 几乎必然是管道/退出/部署问题，不要去 5r 任务里找原因。

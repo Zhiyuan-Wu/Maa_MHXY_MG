@@ -71,7 +71,7 @@ from concurrent.futures import ThreadPoolExecutor
 from maa.toolkit import Toolkit
 from maa.resource import Resource
 from maa.controller import AdbController
-from maa.tasker import Tasker
+from maa.tasker import Tasker, TaskerEventSink
 from maa.pipeline import JRecognitionType, JTemplateMatch
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -805,6 +805,41 @@ def ensure_process(addresses, package=PACKAGE, retries=2, cool_down=10, come_up=
     print(f"<<< 游戏进程就绪：{list(addresses)}")
 
 
+class _RoleTagSink(TaskerEventSink):
+    """把「角色名 ↔ Tasker uuid」显式写进编排日志的探针（Tx/uuid→角色 归号方案）。
+
+    为什么需要：maafw 原生日志按 ``[Tx<tid>]`` 线程交错记录 5 个号，日志里**没有任何角色
+    名**——排查时只能靠"连接顺序 + 时间窗"间接推断 Tx 对应哪个号（08-15 实证该推断可行但
+    脆弱：同秒提交 / 改启动间隔就断）。而每条 ``task start`` 行都带 ``uuid``（Tasker 实例
+    指纹，5 号各一个、全程不变，且 Tx 线程号 per-uuid 全程稳定）——只要在 job 开头把
+    「角色 → uuid」显式打出来，之后原生日志 grep uuid 即可精确归号，无需时间对齐。
+
+    工作方式：``connect_all`` 每建好一个 tasker 就 ``add_sink`` 挂一个本类实例（闭包携带
+    role/addr）；首个 ``Tasker.Task.Starting`` 事件打一行标记（之后静默，避免每任务 2 行
+    噪声）。uuid 从事件 detail 里取（与 native log ``task start:`` 行的 uuid 同源）。
+
+    日志形态（编排日志，每号恰好一行）::
+
+        [tag] 欢喜(127.0.0.1:16736) uuid=9fcb6c12df310cb3   # maafw 按 Tx/uuid 归号用
+
+    排查时拿这张表到 maafw：``task start: .*"uuid":"9fcb…"`` 所在行的 ``[TxNNNNN]`` 即该号
+    的线程号（per-uuid 稳定，见 5r_log_analysis skill §1）。
+    """
+
+    def __init__(self, role, addr):
+        super().__init__()
+        self._role = role
+        self._addr = addr
+        self._tagged = False          # 只打首个 Starting；后续任务静默
+
+    def on_tasker_task(self, tasker, noti_type, detail):
+        if self._tagged or noti_type.value != 1:   # 1 = Starting
+            return
+        self._tagged = True
+        print(f"[tag] {self._role}({self._addr}) uuid={detail.uuid}"
+              f"   # maafw 按 Tx/uuid 归号用")
+
+
 def connect_all(roles, package=PACKAGE):
     """连若干设备，**每账号一份独立 Resource**（各自加载 pipeline + OCR 模型 + custom 注册）。
 
@@ -861,6 +896,9 @@ def connect_all(roles, package=PACKAGE):
         t.bind(resource, ctrl)
         if not t.inited:
             raise RuntimeError(f"{role} Tasker 未就绪（{addr}）")
+        # 角色↔uuid 显式打标：首个 Task.Starting 事件落一行 [tag]，之后原生日志按 uuid 精确归号
+        # （sink 对象由 t._sink_holder 保活，本地无需另行持引用）。
+        t.add_sink(_RoleTagSink(role, addr))
         taskers[role] = t
         print(f"[{idx}] {role} 已连接 {addr}（独立 Resource）")  # [id] 用于 solo --ids
     return taskers
