@@ -552,38 +552,44 @@ ROUTINE = {  # 设计内出口/瞬态自恢复/已知问题截图，report 里�
 # 注意：过滤是"拷贝时排除"，不是"分析时忽略"——report 的 on_error 分布表仍要给 ROUTINE 节点的计数。
 ```
 
-**拷贝命令**（08-15 实战验证；on_error 在 Mac 侧先过滤再传，全量日志仍留 Mac 原地）：
+**拷贝命令**（08-16 修正版；on_error 在 Mac 侧先过滤再传，全量日志仍留 Mac 原地）：
 
 ```bash
 # 1) 编排日志：scp 通配（文件名纯 ASCII，直接拷）
 scp -q "imac@100.116.176.34:/Users/imac/dev/Maa_MHXY_MG/debug/run_5r/run_5r_<YYYYMMDD>_*.log" "debug/mac log/<YYYYMMDD>/"
 
-# 2) on_error（中文文件名）：Mac 侧 python 过滤 ROUTINE 后 tar 流，本地解包
+# 2) on_error（中文文件名）：分两步——先远端 unicode_escape 列清单（纯 ASCII 回传，绕开终端 GBK），
+#    本地过滤 ROUTINE 后逐个 scp（单引号包 remote spec，scp 认 UTF-8）。
+#    ⚠ 08-16 踩坑：把中文名单经 ssh stdin/命令行传给远端 python 做过滤**不可靠**——
+#    转义层级随传递方式漂移（`{set!r}` 里 '\\u6d3b' 一层变两层），症状是**静默全过滤（keep=[]）**
+#    而非报错。结论：**过滤逻辑放本地**（远端只负责 ASCII 通道传输），绝不内联中文进远端脚本。
 PY="C:/Users/zhiyuan/AppData/Local/Programs/Python/Python313/python.exe"
 "$PY" - <<'PY'
-import subprocess,io,tarfile
-d='20260815'; datestr=f'2026.{d[4:6]}.{d[6:]}'          # 改日期
+import subprocess,os
+d='20260816'                                              # 改日期
 ROUTINE={'活动-运镖-开始-点击参加','宝图完成判断-再次检查','藏宝图-背包使用',
          '出售阵法','师门任务-任务分支-装备提交确认-输入验证码',
          '点击打工','队长踢人-选人','点击副本-开始战斗'}
-# 远程 python 列文件（中文文件名经 ssh 传输要用 python，grep 中文 0 命中）
-remote=(f"python3 - <<'RPY'\n"
-        f"import os\n"
-        f"oe='/Users/imac/dev/Maa_MHXY_MG/debug/debug/on_error'\n"
-        f"R={ROUTINE!r}\n"
-        f"fs=[f for f in sorted(os.listdir(oe)) if f.startswith({datestr!r}) and f.split('_',1)[1].rsplit('.',1)[0] not in R]\n"
-        f"print('\\n'.join(fs))\n"
-        f"RPY")
-p=subprocess.run(['ssh','imac@100.116.176.34',remote],capture_output=True)
-keep=[x for x in p.stdout.decode().splitlines() if x]
-remote2=(f"cd /Users/imac/dev/Maa_MHXY_MG/debug/debug/on_error && "
-         f"printf '%s\\n' " + ' '.join(repr(f).replace("'",'\\"') for f in keep) + " | tar czf - -T /dev/stdin")
-p=subprocess.run(['ssh','imac@100.116.176.34',remote2],capture_output=True)
-tf=tarfile.open(fileobj=io.BytesIO(p.stdout))
-for m in tf.getmembers():
-    if m.isfile():
-        open(rf'debug\mac log\{d}\on_error\{m.name}','wb').write(tf.extractfile(m).read())
-print('copied', len(keep))
+# 2a) 远端列文件：节点名按 unicode_escape 输出（纯 ASCII，稳定跨编码）
+script=("import os\n"
+        "oe='/Users/imac/dev/Maa_MHXY_MG/debug/debug/on_error'\n"
+        "for f in sorted(os.listdir(oe)):\n"
+        "    if f.startswith(%r):\n" % ('2026.'+d[4:6]+'.'+d[6:],) +
+        "        print(f.split('_',1)[0], f.split('_',1)[1].rsplit('.',1)[0].encode('unicode_escape').decode())\n")
+p=subprocess.run(['ssh','imac@100.116.176.34','python3'],input=script.encode('ascii'),capture_output=True)
+rows=[l.split(' ',1) for l in p.stdout.decode('ascii').splitlines() if ' ' in l]
+# 2b) 本地过滤（escape 后的节点名反转义回中文再比）
+keep=[(ts,n.encode('ascii').decode('unicode_escape')) for ts,n in rows
+      if n.encode('ascii').decode('unicode_escape') not in ROUTINE]
+# 2c) 逐个 scp（数量少——过滤后通常 0~5 张；文件名含中文用单引号包 remote spec）
+for ts,node in keep:
+    fname=f"{ts}_{node}.png"
+    dst=rf'debug\mac log\{d}\on_error\{fname}'
+    subprocess.run(['scp','-q',
+        f"imac@100.116.176.34:'/Users/imac/dev/Maa_MHXY_MG/debug/debug/on_error/{fname}'",dst],
+        check=True)
+    print('copied',fname)
+print('total kept',len(keep))
 PY
 ```
 
