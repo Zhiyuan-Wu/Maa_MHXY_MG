@@ -2,10 +2,10 @@
     "wabaotu_qingli": {
         "pre_delay": 200,
         "next": [
-            "清理主界面使用-关闭完成",
-            "[JumpBack]清理主界面使用-关闭",
             "[JumpBack]战斗平衡弹窗-点击关闭",
-            "[JumpBack]panduan_zhujiemian"
+            "[JumpBack]panduan_zhujiemian_ks",
+            "清理主界面使用-关闭完成",
+            "[JumpBack]清理主界面使用-关闭"
         ]
     },
     "清理主界面使用-关闭完成": {
