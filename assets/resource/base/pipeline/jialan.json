@@ -137,6 +137,12 @@
             61
         ],
         "action": "Click",
+        "target": [
+            583,
+            204,
+            30,
+            8
+        ],
         "post_delay": 5000,
         "next": [
             "jialan-识别位置-新地区-过渡"
