@@ -21,7 +21,7 @@
         "next": [
             "fuben69new-识别位置-长安城",
             "[JumpBack]panduan_zhujiemian_ks",
-            "[JumpBack]fuben69new-打开大地图"
+            "fuben69new-打开大地图"
         ]
     },
     "fuben69new-打开大地图": {
@@ -67,7 +67,7 @@
         "action": "Click",
         "post_delay": 1000,
         "next": [
-            "[JumpBack]fuben69new-识别位置-长安城-过渡"
+            "fuben69new-识别位置-长安城-过渡"
         ]
     },
     "fuben69new-识别位置-长安城": {
