@@ -14,9 +14,9 @@ description: 排查"梦幻西游五开"（agent/run_5r.py）运行日志的 SOP�
 1. **三份报告全出 + 三份都必须以完整表格呈现**：耗时矩阵（报告一）、账号金币·银币变化量（报告二）、科举答题质量（报告三）三份缺一不可，且**每一份都必须以表格形式贴出，禁止用文字总结糊弄**：
    - **报告一（耗时矩阵）**：必须贴出「行=任务、列=5 个号、单元格=耗时(秒)」的完整矩阵，`X`=墙钟超时、`*`=超基线、`—`=未跑到、`⚠`=异常短疑似假成功 全部标出，并把含异常标记的单元格在表下点名。禁止只说"都正常/某号慢"。
    - **报告二（账号变化量）**：必须贴出每号「账号(port) / 上次金币 / 本次金币 / Δ金币 / 上次银币 / 本次银币 / Δ银币 / 本次时间」**全部 8 列**（§4 account 脚本输出原样贴）。禁止用"5 个号金币都小幅正"一句总结糊弄；负值/大额波动必须在表下逐号说明。
-   - **报告三（科举）**：形式门结果要给数字（门1/门2/门3 各几条）；逐题校验必须贴**错题清单表**（题干 / AI 错答 / 正解 / 依据 / 是否已改），无错也要明确写"0 错"。
+   - **报告三（科举）**：**cache 命中统计必须给数字**（答题事件总数 / cache 命中（含独立题数）/ AI 新答 / 命中率，§4 命中统计脚本输出原样贴）；形式门结果要给数字（门1/门2/门3 各几条）；逐题校验必须贴**错题清单表**（题干 / AI 错答 / 正解 / 依据 / 是否已改），无错也要明确写"0 错"。
 
-2. **科举知识性逐题校验是必做步骤，不要询问用户是否执行**：报告三除三道形式门外，**第四道"逐题知识性人工校验"强制必做**——当天有新入库题就必须逐题判 ✅/❌/⚠，错的给正解并改 cache。**禁止问"要不要我人工校验"——直接做，做完在报告里给错题清单 + 修正结果。** 详见 §3 报告三。
+2. **科举知识性逐题校验是必做步骤，不要询问用户是否执行**：报告三除 cache 命中统计 + 三道形式门外，**第四道"逐题知识性人工校验"强制必做**——当天有新入库题就必须逐题判 ✅/❌/⚠，错的给正解并改 cache。**禁止问"要不要我人工校验"——直接做，做完在报告里给错题清单 + 修正结果。** 详见 §3 报告三。
 
 3. **多个 job / 多次 run 必须全部给出结果**：当天或查询时段内有多个 job（如 155000 done + 195959 cancelled）时，**必须逐个 job 出三份报告**，不能只详报一个、略提另一个；cancelled / failed 的 job 也要说明跑到哪、为何中止（去 maafw 看最后状态）。
 
@@ -178,7 +178,7 @@ powershell.exe -NoProfile -Command "\$live=(Get-CimInstance Win32_Process).Proce
 |---|---|---|
 | 一：耗时矩阵 + 异常标记 | 每号每个任务多久？哪些偏离典型基线 / 超时？ | §4 矩阵脚本 |
 | 二：账号金币·银币变化量 | 这轮跑完，每号钱是涨是跌、涨跌多少？ | §4 account 脚本 |
-| 三：科举答题质量（3 形式门 + **第 4 道知识性人工校验，均强制、不问用户**） | 形式门：answer∉options / 同题冲突 / 与 tiku 不符；第 4 道：逐题判知识对错，错的改 cache | §4 新题质量脚本 + §3 第四道 |
+| 三：科举答题质量（cache 命中统计 + 3 形式门 + **第 4 道知识性人工校验，均强制、不问用户**） | 命中统计：当天答了多少题、cache 命中多少、AI 新答多少；形式门：answer∉options / 同题冲突 / 与 tiku 不符；第 4 道：逐题判知识对错，错的改 cache | §4 命中统计脚本 + 新题质量脚本 + §3 第四道 |
 
 > **SOLO 列表无 kejuxiangshi 的跑（08-15 起）**：报告三直接写"列表无 keju → 当日 0 新题，三门对象为空集，第四道 N/A"，**不要**为凑报告去翻旧日期。sanjieqiyuan 的答题走 reco_sjqy（题库+日志"匹配度：100"），可顺带在报告三提一句当日无错答。
 
@@ -269,7 +269,7 @@ powershell.exe -NoProfile -Command "\$live=(Get-CimInstance Win32_Process).Proce
 - **金币 Δ 正常小幅为正**：日常产出 + 押镖/活跃度收入，扣挖宝/修炼等消耗；银币通常缓涨。
 - **Δ 异常**：暴负 → 大额消耗（买道具/点技能）；为 0 → zhanghao_xinxi 的 OCR 没刷新/读到旧值（留意已知 ⑪ 复发）；暴正 → 上次没跑、跨多天累计。
 - **任一行出现 `账号ID: (未知账号)`**（旧格式）→ 已知 ⑪ 复发，停；正常应为 `账号: 127.0.0.1:<port>`（新格式，07.27 起）。
-- **银币大负的归因排除法（08-15 实战）**：某号银币 Δ 暴负（如 -700万/-1161万）时，按序排除：①`debug/custom/<日期>.log` 里 grep 该号 `[shopScan] 阶段D 卖出`——摆摊卖出是**收入**（+），不能解释负值，但顺手拿到每号卖出件数；②该号各任务耗时/命中是否正常（正常→run 本身没出事）；③剩余解释=run 间隔期间（上次 zhanghao_xinxi 到本次之间，常跨一天）游戏内手动消费或上架费——**报告里标注"待用户确认"，不要硬安在 5r 头上**。
+- **银币大负的归因排除法（08-15 实战）**：不需要尝试解释金币和银币的大幅减少，完全可能是玩家自行操作/消费。如实报告即可
 - **account_info.log 在 Mac 侧**（remote 模式 zhanghao_xinxi 由 Mac 子进程写）——本地 `agent/data/account_info.log` 是旧的（08-13 止），跑 §4 account 脚本前先 ssh 拉 Mac 的。
 
 ### 报告三：科举新入库答题质量
@@ -277,6 +277,14 @@ powershell.exe -NoProfile -Command "\$live=(Get-CimInstance Win32_Process).Proce
 > **08-15 起 SOLO 列表已移除 kejuxiangshi**——当天列表无 keju 时本报告直接写"0 新题，三门空集，第四道 N/A"（见 §3 开头注）。以下内容在 keju 回归列表或回溯历史日期（≤08-14）时使用。
 
 > ⚠ 题库链路认准（用户专门纠正过，别搞混）：**`agent/data/keju_ai_cache.json`（Mac 侧）= 5r 科举实际使用的运行时题库**（`开始答题API` → `AIAnswer.py` 只加载它，命中即点、miss 调 AI 后存回）；`tiku.txt` 是别的任务（三界等）用的，仅作交叉参照；`question_bank.json` 是遗留未接入文件，忽略。结构 `{题干key: {answer, options, question, ts}}`，"新入库"按 `ts[:10]==当天` 界定。
+
+**第 0 道门：cache 命中统计（必出数字，08-17 起强制）**——回答"今天答的题里多少是 cache 直接命中的、多少走了 AI"。数据源 = Mac 侧 loguru 日志 `debug/custom/<YYYY-MM-DD>.log`（`AIAnswer.py::_cache_lookup`/`_cached_or_ask` 每题落一行标记）：
+
+- `缓存精确命中：《Q》→ X` = cache 命中该题（同一题多个号答会产生多行，去重得"独立命中题数"）
+- `缓存未命中，调用AI：《Q》` = AI 新答（≈ 当天新入库条数，可交叉验证报告三的"新入库 N"）
+- 校验恒等式：**命中事件数 + AI 调用数 = 答题事件总数**（应等于 `开始答题API` 每号 hit 数之和；对不上=有号答题链路异常，回 maafw 查）。缓存模糊命中已被禁用（`_FUZZY_THRESHOLD=1.01`），正常不会出现；若日志里见到"缓存模糊命中"按异常上报。
+- 命中率走势还能当**题库健康度**指标：逐日走高 = cache 在积累生效；某天骤降 = 题库被清/换 key 归一化规则变了。
+- 一键命令见 §4「cache 命中统计」（ssh python3 远读，绕开中文 grep 0 命中坑）。报告里按号拆分不必要（loguru 无角色标记），给**总量 + 独立题数 + 按小时分布**即可；按号核答题次数另有 `开始答题API` per-Tx 法（§4.1）。
 
 **四道质量门**（前三道脚本 = §4 新题质量脚本、第四道人工，**均强制**，见硬性规则 2）：
 
@@ -395,6 +403,34 @@ print('Δ = 本次(最近一条) − 上次；负=净消耗。任一行含 (未�
 ```
 
 ```bash
+# 报告三·第0道：keju cache 命中统计（⚠ loguru 日志在 Mac 侧 debug/custom/<日期>.log；
+#   AIAnswer.py 每题落一行「缓存精确命中：《Q》→X」或「缓存未命中，调用AI：《Q》」。
+#   远程 grep 中文 0 命中，用 ssh python3 读。改日期。）
+ssh imac@100.116.176.34 'python3' <<'PY'
+import re
+from collections import Counter
+day="2026-08-17"                                   # ← 改日期
+f=f"/Users/imac/dev/Maa_MHXY_MG/debug/custom/{day}.log"
+hit_q, miss_q, fuzzy = [], [], []
+try:
+    for line in open(f, encoding="utf-8", errors="replace"):
+        m = re.search(r"缓存精确命中：《(.+?)》", line)
+        if m: hit_q.append(m.group(1)); continue
+        m = re.search(r"缓存未命中，调用AI：《(.+?)》", line)
+        if m: miss_q.append(m.group(1)); continue
+        if "缓存模糊命中" in line: fuzzy.append(line.strip()[:80])
+except FileNotFoundError:
+    print(f"日志不存在：{f}（当天没跑 keju？）"); raise SystemExit
+tot = len(hit_q) + len(miss_q)
+print(f"答题事件总数: {tot}  |  cache 命中: {len(hit_q)}（独立题 {len(set(hit_q))}）"
+      f"  |  AI 新答: {len(miss_q)}（独立题 {len(set(miss_q))}）")
+print(f"命中率(按事件): {len(hit_q)/tot*100:.0f}%" if tot else "命中率: N/A")
+if fuzzy:
+    print(f"!! 模糊命中 {len(fuzzy)} 次（已禁用功能不应出现，按异常上报）:")
+    for l in fuzzy[:5]: print("  ", l)
+# 校验：命中+AI 应 == 各号「开始答题API」hit 之和（maafw per-Tx 数，见 §4.1/§1.1）
+PY
+
 # 报告三：科举题库(keju_ai_cache.json)新入库答题质量（⚠ 文件在 Mac 侧，先 scp 拉回；
 #   当天 SOLO 列表无 kejuxiangshi 时跳过本脚本。默认查当天 ts；传第 2 参指定日期如 2026-07-30）
 "$PY" -c "
@@ -537,7 +573,7 @@ debug/mac log/
     └── report.md                 # 当天分析报告
 ```
 
-**report.md 必含**（即硬性规则 1/3/5 的产出落盘）：每个 job 一章的三份量化报告（耗时矩阵/账号变化/科举）+ team 阶段核实表 + 异常根因（节点级 trace + 截图画面结论）+ on_error 分布表 + 结论与待办。当天多 job 写一份 report.md 分章节，不拆多份。
+**report.md 必含**（即硬性规则 1/3/5 的产出落盘）：每个 job 一章的三份量化报告（耗时矩阵/账号变化/科举——含 cache 命中统计）+ team 阶段核实表 + 异常根因（节点级 trace + 截图画面结论）+ on_error 分布表 + 结论与待办。当天多 job 写一份 report.md 分章节，不拆多份。
 
 **⚠ on_error 只归档"异常取证"截图——设计内退出门 / 已知重复错误不拷贝**（08-15 用户要求；当日实测过滤后 44→4 张，整档 710MB→52MB）。过滤 = 不在下列 ROUTINE 名单内的才拷：
 
@@ -557,6 +593,9 @@ ROUTINE = {  # 设计内出口/瞬态自恢复/已知问题截图，report 里�
 ```bash
 # 1) 编排日志：scp 通配（文件名纯 ASCII，直接拷）
 scp -q "imac@100.116.176.34:/Users/imac/dev/Maa_MHXY_MG/debug/run_5r/run_5r_<YYYYMMDD>_*.log" "debug/mac log/<YYYYMMDD>/"
+
+# 1b) loguru 日志（报告三·cache 命中统计的数据源，跑过 keju 的日期才需要）
+scp -q "imac@100.116.176.34:/Users/imac/dev/Maa_MHXY_MG/debug/custom/<YYYY-MM-DD>.log" "debug/mac log/<YYYYMMDD>/"
 
 # 2) on_error（中文文件名）：分两步——先远端 unicode_escape 列清单（纯 ASCII 回传，绕开终端 GBK），
 #    本地过滤 ROUTINE 后逐个 scp（单引号包 remote spec，scp 认 UTF-8）。
