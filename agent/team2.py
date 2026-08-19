@@ -109,8 +109,8 @@ DEFAULT_OVERRIDES = {
 }
 
 # ---- 远端/服务模式配置（双机部署，一般无需改）----
-WIN_IP = "192.168.5.5"     # Win（MuMu 主机）局域网 IP
-MAC_IP = "192.168.5.148"   # Mac（资源/执行） 局域网 IP
+WIN_IP = "100.77.236.94"   # Win（MuMu 主机）Tailscale IP
+MAC_IP = "100.116.176.34"  # Mac（资源/执行）  Tailscale IP
 ADB_SERVER_PORT = 5038
 MUMU_API_PORT = 5080
 CLI_API_PORT = 5090
