@@ -147,6 +147,48 @@ _60_MAP = {
     "飘带": "七彩罗刹", "扇": "清秋扇", "爪刺": "青刚刺", "魔棒": "满天星",
     "枪": "玄铁矛", "法杖": "天山雪", "剑": "游龙剑", "弓": "连珠神弓",
 }
+_SKILL_BOOK = [
+    "再生", "法术波动", "法术连击"
+]
+_HUIDAN = [
+    "慧心", "静岳"
+]
+
+# 可售卖物品 → 最低卖出价（MIN_PRICE 硬下限）。键可以是：
+#   - 字面物品名（"临时符"、"玫瑰花"）；
+#   - **模块级变量名**（"_50_MAP"/"_60_MAP" 等 dict → 展开 value；"_SKILL_BOOK"/"_HUIDAN"
+#     等 list → 展开元素）——同组元素共享一个价格。
+# 展开结果缓存在 _SELL_TABLE：{物品名: 最低价}。物品名只要作为 OCR 文本子串命中即算可售。
+_MIN_PRICE = {
+    "_50_MAP": 500,
+    "_60_MAP": 900,
+    "临时符": 0,
+    "_SKILL_BOOK": 4500,
+    "_HUIDAN": 4400,
+    "玫瑰花": 2700,
+    "金兰花": 2700
+}
+
+
+def _expand_sell_table(min_price_def):
+    """把 ``_MIN_PRICE``（键可为变量名）展开成 ``{物品名: 最低价}``。
+
+    键是本模块的全局变量名（以 ``_`` 开头、能在 globals() 找到）→ dict 取 values、
+    list 取元素，共享同一价格；否则视为字面物品名。展开在 import 期一次完成。
+    """
+    g = globals()
+    table = {}
+    for key, price in min_price_def.items():
+        if key.startswith("_") and key in g and isinstance(g[key], (dict, list, tuple)):
+            names = list(g[key].values()) if isinstance(g[key], dict) else list(g[key])
+        else:
+            names = [key]
+        for n in names:
+            table[n] = price
+    return table
+
+
+_SELL_TABLE = _expand_sell_table(_MIN_PRICE)
 
 @AgentServer.custom_action("shopScan")
 class ShopScan(CustomAction):
@@ -235,13 +277,11 @@ class ShopScan(CustomAction):
     _DEFAULT_DELIST_TIMEOUT = 5000            # 下架节点识别上限（ms），防空格白等 20s
     _DEFAULT_LISTABLE_CAP = 8                 # 待售队列总长上限
 
-    # ===== 卖出编排（两遍法：先只读扫描 20 格 → 倒序卖出）默认参数 =====
-    # 目标物品 = 详情名命中 _50_MAP/_60_MAP 的 value（装备名）。等级 → 最低保护价 MIN_PRICE：
-    # 50 级 500、60 级 900。最低卖出价 = max(MIN_PRICE, (market1+market2)/2 - 1)
-    # （MIN_PRICE 是硬下限保护价，市场均价更高时跟市场）。
+    # ===== 卖出编排（两遍法：先只读扫描 20 格 → 子集内倒序卖出）默认参数 =====
+    # 可售卖物品清单 = _MIN_PRICE 的键（dict/list 变量名自动展开，见 _SELL_TABLE）；
+    # 最低卖出价 = max(_MIN_PRICE[物品], (market1+market2)/2 - 1)
+    # （_MIN_PRICE 是硬下限保护价，市场均价更大时跟市场）。
     _SELL_ENTRY = "摆摊-上架物品"              # OCR「本服上架」→ 点击；原样 run_task，不 override
-    _MIN_PRICE_50 = 500                        # 50 级装备最低卖出价
-    _MIN_PRICE_60 = 900                        # 60 级装备最低卖出价
     # 详情页价格档按钮（roi，点击其中心）：一档 = 基准价 ±10%
     _PRICE_DOWN_ROI = [746, 462, 29, 24]       # 减小一档（基准价-10%）
     _PRICE_UP_ROI = [985, 463, 25, 25]         # 增大一档（基准价+10%）
@@ -539,16 +579,15 @@ class ShopScan(CustomAction):
 
     @staticmethod
     def _match_sell_target(name):
-        """物品名命中 ``_50_MAP``/``_60_MAP`` 的 value → 返回 ``(level, min_price)``，否则 None。
+        """物品名命中 ``_SELL_TABLE``（_MIN_PRICE 展开后的可售卖清单）→ 返回最低价，否则 None。
 
-        例 name="夜魔披风" 命中 _60_MAP["男衣"] → ``("60", 900)``。
+        匹配为**子串包含**（OCR 文本可能带修饰前后缀，如「夜魔披风·精制」）。
+        例 name="夜魔披风" 命中 _60_MAP 展开的 value → ``900``；
+        name="再生" 命中 _SKILL_BOOK 展开的元素 → ``4500``。
         """
-        for value in _60_MAP.values():
-            if value in (name or ""):
-                return "60", 900
-        for value in _50_MAP.values():
-            if value in (name or ""):
-                return "50", 500
+        for sell_name, min_price in _SELL_TABLE.items():
+            if sell_name in (name or ""):
+                return min_price
         return None
 
     @staticmethod
@@ -602,18 +641,18 @@ class ShopScan(CustomAction):
         """卖出单个物品：点格点 → 核对名字 → 读当前价 → 调价 → run_task 上架。
 
         ``item`` 是阶段 B1 只读扫描的记录（含 name/price/market_price1/market_price2/
-        grid_center/level/min_price）。返回是否上架成功（查「摆摊-上架物品」节点 hit）。
+        grid_center/min_price）。返回是否上架成功（查「摆摊-上架物品」节点 hit）。
         """
         cx, cy = item["grid_center"]
-        name, level, min_price = item["name"], item["level"], item["min_price"]
+        name, min_price = item["name"], item["min_price"]
         m1, m2 = int(item["market_price1"]), int(item["market_price2"])
 
-        # 最低卖出价 = max(MIN_PRICE, (market1+market2)/2 - 1)：
-        # MIN_PRICE（50级500/60级900）是**硬下限**（保护价，绝不击穿）；
+        # 最低卖出价 = max(_MIN_PRICE[物品], (market1+market2)/2 - 1)：
+        # _MIN_PRICE 是**硬下限**（保护价，绝不击穿）；
         # 市场均价更高时跟市场（(m1+m2)/2-1 比第二高卖单还低 1，保证竞争力）。
         floor_price = max(min_price, int((m1 + m2) / 2) - 1)
         logger.info(
-            f"[shopScan] [{tag}] 阶段D 卖出 {name!r}(Lv{level}) @ ({cx},{cy})："
+            f"[shopScan] [{tag}] 阶段D 卖出 {name!r}(保底{min_price}) @ ({cx},{cy})："
             f"当前价={item['price']} 市场价1={m1} 市场价2={m2} → "
             f"max({min_price}, ({m1}+{m2})/2-1) = {floor_price}"
         )
@@ -697,43 +736,83 @@ class ShopScan(CustomAction):
             time.sleep(self._DEFAULT_SELL_CLICK_WAIT)
 
     def _sell_phase(self, context, tag, items, listable):
-        """阶段 D：**从后向前**卖出命中装备表的物品，直到卖出数达 ``listable`` 或扫完。
+        """阶段 D：先**正序**选出前 ``listable`` 个候选，再在这个子集内**倒序**卖出。
 
-        两遍法的第二遍。为什么倒序：上架成功后待售卖区所有物品**向前移动一格**，正序点
-        会让后续格点错位；倒序从最后一格卖起，前面未卖物品的坐标不变。每格卖出前会
-        重新 OCR 名字核对（两遍之间队列若被动过，防卖错）。
+        两遍法的第二遍。为什么子集内倒序：上架成功后待售卖区所有物品**向前移动一格**，
+        正序点会让子集内后续格点错位；倒序从子集最后一格卖起，子集内未卖物品的坐标
+        不变。子集取正序前 N 个（例：候选 ABCD、listable=2 → 子集 AB → 卖出顺序 BA，
+        而非从全体倒序取 DC）。每格卖出前会重新 OCR 名字核对（两遍之间队列若被动过，防卖错）。
         """
-        # 只卖「命中装备表 + 有完整市场价」的记录
+        # 只卖「命中 _SELL_TABLE + 有完整市场价」的记录
         candidates = []
         for it in items:
             tgt = self._match_sell_target(it.get("name", ""))
-            if not tgt:
+            if tgt is None:   # 保底价可为 0（临时符），不能用 if not tgt 判
                 continue
             if not (str(it.get("market_price1", "")).isdigit()
                     and str(it.get("market_price2", "")).isdigit()):
                 logger.info(
-                    f"[shopScan] [{tag}] 阶段D {it.get('name')!r} 命中装备表但市场价不全"
+                    f"[shopScan] [{tag}] 阶段D {it.get('name')!r} 命中售卖表但市场价不全"
                     f"（m1={it.get('market_price1')!r} m2={it.get('market_price2')!r}），跳过"
                 )
                 continue
-            level, min_price = tgt
-            candidates.append({**it, "level": level, "min_price": min_price})
+            candidates.append({**it, "min_price": tgt})
+        # ① 正序选前 listable 个为本次卖出子集
+        subset = candidates[:listable] if listable > 0 else []
         logger.info(
-            f"[shopScan] [{tag}] 阶段D 候选卖出（倒序）："
-            f"{[(c['name'], c['level'], c['grid_center']) for c in reversed(candidates)]}"
-            f"，listable 上限 {listable}"
+            f"[shopScan] [{tag}] 阶段D 候选共 {len(candidates)} 个："
+            f"{[c['name'] for c in candidates]}；listable={listable} → 子集（正序前 N）"
+            f"{[c['name'] for c in subset]}；卖出顺序（子集内倒序）："
+            f"{[c['name'] for c in reversed(subset)]}"
         )
+        # ② 子集内倒序卖出
         sold = []
-        for it in reversed(candidates):
-            if len(sold) >= listable:
-                logger.info(f"[shopScan] [{tag}] 阶段D 卖出数已达 listable={listable}，停止")
-                break
+        for it in reversed(subset):
             ok = self._sell_one(context, tag, it)
             if ok:
-                sold.append({"name": it["name"], "level": it["level"],
+                sold.append({"name": it["name"], "min_price": it["min_price"],
                              "grid_center": it["grid_center"]})
-        logger.info(f"[shopScan] [{tag}] 阶段D 卖出完成：{len(sold)}/{listable} → {sold}")
-        return {"sold": sold, "sold_count": len(sold), "candidates": len(candidates)}
+        logger.info(f"[shopScan] [{tag}] 阶段D 卖出完成：{len(sold)}/{len(subset)} → {sold}")
+        return {"sold": sold, "sold_count": len(sold),
+                "candidates": len(candidates), "subset": len(subset)}
+
+    def _plan_only(self, tag, items, listable):
+        """dry-run：与 ``_sell_phase`` 同款候选/子集推导，但**只打印计划不执行**。
+
+        输出每件候选的「保底价 / 当前价 / 市场价 / 拟定 floor」，供人工核对扫描结果
+        与卖出计划（``enable_sell=false`` 时走此路径）。
+        """
+        candidates = []
+        for it in items:
+            tgt = self._match_sell_target(it.get("name", ""))
+            if tgt is None:   # 保底价可为 0（临时符），不能用 if not tgt 判
+                continue
+            if not (str(it.get("market_price1", "")).isdigit()
+                    and str(it.get("market_price2", "")).isdigit()):
+                logger.info(
+                    f"[shopScan] [{tag}] 阶段D(dry) {it.get('name')!r} 命中售卖表但市场价不全，跳过"
+                )
+                continue
+            m1, m2 = int(it["market_price1"]), int(it["market_price2"])
+            floor = max(tgt, int((m1 + m2) / 2) - 1)
+            candidates.append({**it, "min_price": tgt, "floor_price": floor})
+        subset = candidates[:listable] if listable > 0 else []
+        logger.info(
+            f"[shopScan] [{tag}] 阶段D(dry) 候选 {len(candidates)} 个："
+            + "; ".join(f"{c['name']}(保底{c['min_price']} 当前{c['price']} "
+                        f"市场{c['market_price1']}/{c['market_price2']} 拟卖{c['floor_price']})"
+                        for c in candidates)
+        )
+        logger.info(
+            f"[shopScan] [{tag}] 阶段D(dry) listable={listable} → 子集（正序前 N）："
+            f"{[c['name'] for c in subset]}；卖出顺序（子集内倒序）："
+            f"{[c['name'] for c in reversed(subset)]}"
+        )
+        return {"sold": [], "sold_count": 0, "candidates": len(candidates),
+                "subset": len(subset), "dry_run": True,
+                "plan": [{"name": c["name"], "min_price": c["min_price"],
+                          "floor_price": c["floor_price"], "grid_center": c["grid_center"]}
+                         for c in subset]}
 
     def _template_box(self, context, image, node, template, roi, threshold):
         """在 ``roi`` 内 TemplateMatch ``template``，命中返回 ``best_result.box=[x,y,w,h]``，否则 None。"""
@@ -902,9 +981,9 @@ class ShopScan(CustomAction):
                 #    不合法 → OCR 不可靠，该格 sellable=False（详情仍照常关闭，避免遗留弹窗挡住下一格）。
                 delta_valid = price_delta in _VALID_PRICE_DELTA
                 sellable = delta_valid
-                # 命中装备表（_50/_60_MAP value）→ 阶段 D 的卖出候选
+                # 命中售卖表（_SELL_TABLE）→ 阶段 D 的卖出候选
                 tgt = self._match_sell_target(name)
-                if tgt:
+                if tgt is not None:   # 保底价可为 0（临时符），不能用 if tgt 判
                     sellable = sellable and bool(
                         market1.isdigit() and market2.isdigit()
                     )
@@ -913,7 +992,7 @@ class ShopScan(CustomAction):
                     f"market1={market1!r} market2={market2!r} price_delta={price_delta!r} "
                     f"-> sellable={sellable}"
                     + ("" if delta_valid else "（delta 非法，降级 False）")
-                    + (f"（命中装备表 Lv{tgt[0]}）" if tgt else "")
+                    + (f"（命中售卖表 保底{tgt}）" if tgt is not None else "")
                 )
 
                 items.append({
@@ -941,8 +1020,13 @@ class ShopScan(CustomAction):
                 if close_wait > 0:
                     time.sleep(close_wait)
 
-            # ===== 阶段 D：从后向前卖出（上限 listable）=====
-            sold = self._sell_phase(context, tag, items, listable)
+            # ===== 阶段 D：正序选前 listable 个候选 → 子集内倒序卖出 =====
+            # enable_sell=false（dry-run）：只打印卖出计划（候选/子集/顺序/每件保底价），
+            # 不点击不出售——供调试验证扫描与计划逻辑。
+            if argv_dict.get("enable_sell", True):
+                sold = self._sell_phase(context, tag, items, listable)
+            else:
+                sold = self._plan_only(tag, items, listable)
 
         # 全部扫完 → 落盘
         payload = {

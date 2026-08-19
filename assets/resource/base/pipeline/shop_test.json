@@ -38,6 +38,7 @@
             "detail_wait": 1.0,
             "close_wait": 0.5,
             "enable_price_scan": true,
+            "enable_sell": false,
             "threshold": 0.7
         },
         "next": []
