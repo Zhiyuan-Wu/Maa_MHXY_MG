@@ -275,8 +275,9 @@ DEBUG_DIR     = os.path.join(REPO_DIR, "debug")   # MaaFramework 工作目录 + 
 #       Mac 跑 cli_server（接收 CLI 指令、子进程跑 main()、Maa 资源仅在此加载）；
 #       Win 发 `remote <mode>` → Mac cli_server → 探测到远端 → 经 Win:5038 adb 驱动设备、
 #       经 Win:5080 API 管生命周期。详见 plan sleepy-inventing-pearl.md。
-WIN_IP   = "100.77.236.94"   # Win（MuMu 主机）Tailscale IP —— 跑 mumu_server
-MAC_IP   = "100.116.176.34"  # Mac（资源/执行）  Tailscale IP —— 跑 cli_server
+WIN_IP   = "192.168.5.5"     # Win（MuMu 主机）局域网 IP —— 跑 mumu_server
+MAC_IP   = "192.168.5.148"   # Mac（资源/执行） 局域网 IP —— 跑 cli_server
+                               # （Tailscale 不可用时的替代链路；同机保护 _ip_is_local 与 IP 值无关）
 ADB_SERVER_PORT = 5038       # mumu_server 拉起的专用 0.0.0.0 adb server（绝不碰 MuMu 自管的 5037）
 MUMU_API_PORT   = 5080       # mumu_server 的 HTTP API（Win）
 CLI_API_PORT    = 5090       # cli_server  的 HTTP API（Mac）
