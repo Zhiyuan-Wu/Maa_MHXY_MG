@@ -243,7 +243,7 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
 SOLO_ENTRIES = ["5R_duiyuan_tuichuduiwu", "shuangbei", "huoli", "fuli_qiandao", "shimen_renwu_new", "yunbiao_renwu2", "baotu_renwu", "wabaotu_qingli",
                 "mijing_renwu", "sanjieqiyuan", "zhengli_baibao", "jiayuan_zhengli", "huoli", "zhanghao_xinxi", "jialan", "baitanchushou"]
 
-if datetime.now().weekday() == 2:
+if datetime.now().weekday() == 3:
     SOLO_ENTRIES.insert(1, "bangpai_renwu")
 if datetime.now().weekday() < 5:
     # SOLO_ENTRIES.insert(0, "kejuxiangshi")
