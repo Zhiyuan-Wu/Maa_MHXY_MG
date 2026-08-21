@@ -2,7 +2,7 @@
     "fuli_qiandao": {
         "next": [
             "fuli_qiandao-ocr",
-            "[JumpBack]panduan_zhujiemian"
+            "[JumpBack]panduan_zhujiemian_ks"
         ]
     },
     "fuli_qiandao-ocr": {

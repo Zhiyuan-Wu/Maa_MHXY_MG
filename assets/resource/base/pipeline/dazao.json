@@ -376,7 +376,13 @@
         "threshold": [
             0.8
         ],
-        "action": "Click"
+        "action": "Click",
+        "target_offset": [
+            15,
+            15,
+            -30,
+            -30
+        ]
     },
     "打造-购买材料-购买制造书": {
         "recognition": "ColorMatch",
