@@ -55,6 +55,19 @@ class ShimenRenwuDecide(CustomRecognition):
     _STREAK_LOCK = threading.Lock()
     _miss_streaks: dict = {}  # {adb_serial: 连续未命中次数}
 
+    # OCR 误读别名：key = 装备名（canonical，MAP 里的正式名），value = 面板 OCR 常见误读变体。
+    # 「桃之夭夭」的「夭」被 PaddleOCR 稳定误读成「天」（08-22 job 实证：6 次 OCR 全部读作
+    # 「桃之天天」、精确子串匹配永不命中、打造分支从未触发，全被当普通任务点掉了）。匹配时
+    # canonical 与变体任一命中即算；dazao 装备名判定的 expected 也同时带两者（打造面板的 OCR
+    # 对同字形同样可能误读，只写 canonical 会 miss）。
+    # 后两条是历史日志里的**一次性**误读（08-20 连珠神弓→连珠神写、08-21 冷月弯刀→冷月弯力，
+    # 均靠下一帧重 OCR 自愈）；加入作廉价保险——子串很特异、无误报风险。
+    _OCR_ALIASES = {
+        "桃之夭夭": ["桃之天天"],
+        "连珠神弓": ["连珠神写"],
+        "冷月弯刀": ["冷月弯力"],
+    }
+
     _50_MAP = {
         # 防具
         "鞋": "绿靴", "腰带": "乱牙咬", "项链": "荧光坠子", "发钗": "媚狐头饰",
@@ -167,23 +180,33 @@ class ShimenRenwuDecide(CustomRecognition):
         full_text = "".join(r.text for r in results)
         logger.info(f"[shimen_decide] 面板 OCR (roi={roi_used}): {full_text}")
 
-        # 合并两个等级 MAP：装备名 → (等级, 品类)。
+        # 合并两个等级 MAP：装备名 → (等级, 品类)。同名装备 60 级优先（setdefault 保留先插入者）。
+        # 60 先入表：命中打造时 60 级优先（与旧语义一致——同名时 60 先插入被 setdefault 保留）。
         name_to_target = {}
         for cat, name in self._60_MAP.items():
             name_to_target.setdefault(name, ("60", cat))
         for cat, name in self._50_MAP.items():
             name_to_target.setdefault(name, ("50", cat))
+        # 误读变体 → canonical（_OCR_ALIASES 反查）。匹配 full_text 时变体也算命中，取 canonical
+        # 去查等级/品类，避免「夭→天」这类稳定 OCR 误读让打造分支永不触发。
+        alias_to_name = {a: n for n, al in self._OCR_ALIASES.items() for a in al}
 
-        # ① 命中打造类任务：full_text 含某装备名 → override dazao 三节点 + run_task dazao
+        # ① 命中打造类任务：full_text 含某装备名（或其 OCR 误读变体）→ override dazao 三节点
+        #    + run_task dazao。先试 canonical 精确子串；未命中再试误读变体（命中映射回 canonical）。
         hit_name = next((n for n in name_to_target if n in full_text), None)
+        if hit_name is None:
+            hit_name = next((alias_to_name[a] for a in alias_to_name if a in full_text), None)
         not_own = "拥有0" in full_text or "0/1" in full_text
         if hit_name and not_own:
             level, category = name_to_target[hit_name]
             logger.info(f"[shimen_decide] 命中打造任务: {level}级 {category} -> {hit_name}")
+            # 装备名判定的 expected 带 canonical + OCR 误读变体：打造面板 OCR 对同字形（如 夭→天）
+            # 同样可能误读，只写 canonical 会在 dazao 链路里 miss 卡死。
+            name_expected = [hit_name] + self._OCR_ALIASES.get(hit_name, [])
             context.override_pipeline({
                 self._DAZAO_LEVEL_NODE: {"expected": [level]},
                 self._DAZAO_CATEGORY_NODE: {"expected": [category]},
-                self._DAZAO_NAME_NODE: {"expected": [hit_name]},
+                self._DAZAO_NAME_NODE: {"expected": name_expected},
             })
             context.run_task(self._DAZAO_ENTRY)
 
