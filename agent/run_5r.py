@@ -41,7 +41,7 @@
                   但在 Mac 上执行。
 
 # 全局选项 ``--config <name>``（可出现在任意位置）：从 ``agent/<name>.py`` 加载配置覆盖
-                  头部配置区（ROLES / FUBEN69NEW_PLAN / SOLO_ENTRIES / KEJU_AI / 超时 等）。
+                  头部配置区（ROLES / FUBEN69NEW_PLAN / SOLO_ENTRIES / SOLO_MAP / KEJU_AI / 超时 等）。
                   config 文件在 run_5r 的 globals 命名空间里 exec：同名变量赋值直接覆盖、
                   未列出的字段保持默认、可引用 run_5r 已定义的变量。``remote`` 会把它透传给
                   Mac 子进程。例：``python run_5r.py --config team2 full``。
@@ -133,7 +133,7 @@ def _apply_config(name):
     搜索顺序：``agent/<name>.py`` → ``<repo>/<name>.py`` → 当作路径（相对 cwd/绝对，
     含路径分隔符或 ``.py`` 后缀时）。文件在本模块 ``globals()`` 命名空间里 exec，故：
 
-    * 同名变量赋值**直接覆盖** run_5r 全局（ROLES / FUBEN69NEW_PLAN / SOLO_ENTRIES / …）；
+    * 同名变量赋值**直接覆盖** run_5r 全局（ROLES / FUBEN69NEW_PLAN / SOLO_ENTRIES / SOLO_MAP / …）；
     * **未列出的字段保持 run_5r 默认**；
     * 可引用 run_5r 已定义的变量（如 ``os`` / ``datetime`` / ``KEJU_AI``）做条件或派生。
 
@@ -234,9 +234,9 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
     "zhuogui": 1800,       # ZHUOGUI_ROUNDS 每轮捉鬼墙钟超时
     "duizhang_TR": 300, "duiyuan": 14400,   # 队员覆盖整段 5本+捉鬼（≤4h）
     "solo": 2400,          # 单个 solo 任务的墙钟超时
-    "solo_overall": 7200,  # 整轮 solo（全部账号×全部任务）的墙钟总超时；到点未完则收口退出
+    "solo_overall": 10800,  # 整轮 solo（全部账号×全部任务）的墙钟总超时；到点未完则收口退出
     "bangpai_renwu": 3600,
-    "zhuagui": 14400,      # 队长无限捉鬼的墙钟安全帽（4h）；实际靠 Ctrl+C 停，到点 post_stop 收口
+    "zhuagui": 28800,      # 队长无限捉鬼的墙钟安全帽（8h）；实际靠 Ctrl+C 停，到点 post_stop 收口
 }
 # 单人任务列表（任务间自动插 barrier：solo_all 每个entry前 sleep5 + 打开大地图重置位置，
 # 故这里不再手动插"打开大地图_69副本"）。
@@ -244,10 +244,22 @@ SOLO_ENTRIES = ["5R_duiyuan_tuichuduiwu", "shuangbei", "huoli", "fuli_qiandao", 
                 "mijing_renwu", "sanjieqiyuan", "zhengli_baibao", "jiayuan_zhengli", "huoli", "zhanghao_xinxi", "jialan", "baitanchushou"]
 
 if datetime.now().weekday() == 3:
+    SOLO_ENTRIES.insert(1, "bangpai_qiandao")
     SOLO_ENTRIES.insert(1, "bangpai_renwu")
+    
 if datetime.now().weekday() < 5:
     # SOLO_ENTRIES.insert(0, "kejuxiangshi")
     SOLO_ENTRIES.append("kejuxiangshi")
+
+SOLO_MAP = {
+    "队长": SOLO_ENTRIES,
+    "渣中": SOLO_ENTRIES,
+    "6130": SOLO_ENTRIES,
+    "欧阳": SOLO_ENTRIES,
+    "晚风": SOLO_ENTRIES,
+}
+# SOLO_MAP 支持每账号定制 solo 任务列表（key=角色名，同 ROLES）；未列出的角色/空列表回退
+# SOLO_ENTRIES。solo_all 按角色解析（命令行显式给任务名时 SOLO_MAP 不生效，全员跑同一列表）。
 
 # 科举乡试 AI 答题凭证（对应 interface.json「是否使用Ai进行答题=Yes」）。
 # 用 deepseek（openai 兼容端点）。apikey 从 .env 的 OPENAI_KEY 读（_load_dotenv 已加载进 os.environ）。
@@ -1466,30 +1478,47 @@ def team_dungeon(taskers, member_names, timeouts=None):
 # ---------------- 能力 3：并行单人 pipeline ----------------
 
 def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=None, solo_timeouts=None):
-    """5 账号**并行**执行单人 pipeline；每个账号内**顺序**跑 ``entries``。
+    """5 账号**并行**执行单人 pipeline；每个账号内**顺序**跑自己的任务列表。
 
     ids: ``None``=全部账号；或账号 id 集合（1-based，按 ``ROLES`` 顺序，连接日志里有 ``[id] 角色``）。
+
+    任务列表来源（``entries`` 参数 = 命令行显式指定的任务名；None = 未指定）：
+      - ``entries`` 非 None → **全员跑同一列表**（``solo <任务名...>`` 的现行为，SOLO_MAP 不生效）；
+      - ``entries`` None → 每账号查 ``SOLO_MAP[角色]``；未列出/空列表回退 ``SOLO_ENTRIES``。
+      故想让某账号跑不同任务：头部（或 --config 文件）改 ``SOLO_MAP["该角色"] = [...]``。
 
     超时：
       - ``per_timeout``：单个任务的**默认**墙钟超时（``run_task`` 内 ``post_stop`` 收口）。
       - ``solo_timeouts``：可选 ``{entry: 秒}`` —— 对**指定单人任务**覆盖超时；没列到的任务回退
         ``per_timeout``。``main()`` 里从 ``TIMEOUTS`` 构造：``TIMEOUTS.get(entry, TIMEOUTS['solo'])``，
-        于是可在 ``TIMEOUTS`` 里给任意 SOLO_ENTRIES 精细设超时（如 ``"bangpai_renwu": 3600``），
+        于是可在 ``TIMEOUTS`` 里给任意任务精细设超时（如 ``"bangpai_renwu": 3600``），
         没有的自动回退 ``"solo": 2400``。
       - ``overall_timeout``：**整轮 solo** 墙钟总超时。到点后各账号当前任务被收口、后续任务不再执行。
         实现是"收缩式"：每个任务实际 timeout = ``min(单任务超时, 距整轮截止的剩余时间)``，于是
         ``run_task`` 现有的单任务超时机制自然把整轮截止传到每个任务——无需额外看门狗线程，整轮
         截止被各账号在 ~1s 轮询粒度内一致地兑现。
     """
-    entries = entries or SOLO_ENTRIES
     items = list(taskers.items())  # [(role, tasker)]，按 ROLES 顺序
     chosen = [(r, t) for i, (r, t) in enumerate(items, 1) if ids is None or i in ids]
     who = ", ".join(f"{i}:{r}" for i, (r, _) in enumerate(items, 1)
                     if ids is None or i in ids) or "无"
-    print(f">>> 并行单人（每账号顺序跑 {entries}；单任务≤{per_timeout}s"
-          + (f"，整轮≤{overall_timeout}s" if overall_timeout else "")
-          + f"）对象: {who}")
-    _custom = {e: v for e, v in (solo_timeouts or {}).items() if v != per_timeout and e in entries}
+    # 每账号任务列表：显式指定=全员同一列表；否则 SOLO_MAP[角色]，缺键/空回退 SOLO_ENTRIES
+    def _entries_for(role):
+        if entries is not None:
+            return entries
+        return SOLO_MAP.get(role) or SOLO_ENTRIES
+    if entries is not None:
+        print(f">>> 并行单人（每账号顺序跑 {entries}；单任务≤{per_timeout}s"
+              + (f"，整轮≤{overall_timeout}s" if overall_timeout else "")
+              + f"）对象: {who}")
+    else:
+        print(f">>> 并行单人（每账号按 SOLO_MAP 跑各自列表，缺省 {SOLO_ENTRIES}；单任务≤{per_timeout}s"
+              + (f"，整轮≤{overall_timeout}s" if overall_timeout else "")
+              + f"）对象: {who}")
+        for r, _ in chosen:
+            print(f"    [{r}] 任务列表: {_entries_for(r)}")
+    _custom = {e: v for e, v in (solo_timeouts or {}).items()
+               if v != per_timeout and any(e in _entries_for(r) for r, _ in chosen)}
     if _custom:
         print("    自定义单任务超时: " + ", ".join(f"{k}={v}s" for k, v in _custom.items()))
     if not chosen:
@@ -1499,7 +1528,7 @@ def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=
     overall_deadline = (time.time() + overall_timeout) if overall_timeout else None
 
     def one(role, t):
-        for e in entries:
+        for e in _entries_for(role):
             left = (overall_deadline - time.time()) if overall_deadline else None
             if left is not None and left <= 0:
                 print(f"    [{role}] 整轮超时，停止后续单人任务")
@@ -1896,13 +1925,17 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
         print("=== 组队测试完成（队员仍在队伍中，已停止其自动化）===")
 
     if mode in ("full", "solo"):
-        # solo 任务来源优先级：命令行指定 > 头部 SOLO_ENTRIES
-        solo_entries = solo_tasks or SOLO_ENTRIES
+        # solo 任务来源优先级：命令行指定 > SOLO_MAP[角色]（缺省回退 SOLO_ENTRIES）。
+        # solo_tasks 显式给出 → solo_all entries 参数非 None → 全员同一列表（SOLO_MAP 不生效）；
+        # 未给出 → entries=None → solo_all 逐角色查 SOLO_MAP。
+        solo_entries = solo_tasks  # None = 未显式指定（走 SOLO_MAP / SOLO_ENTRIES）
+        all_entries = set(solo_tasks or []) if solo_tasks else (
+            set(SOLO_ENTRIES) | {e for lst in SOLO_MAP.values() for e in (lst or [])})
         print("=== 并行单人 pipeline ===")
         solo_all(taskers, entries=solo_entries, ids=solo_ids,
                  per_timeout=timeouts["solo"], overall_timeout=timeouts["solo_overall"],
                  solo_timeouts={e: timeouts.get(e, timeouts["solo"])
-                                for e in solo_entries if e in timeouts})
+                                for e in all_entries if e in timeouts})
 
     # full 模式跑完
     if mode == "full":

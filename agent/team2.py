@@ -10,7 +10,7 @@
 
 可覆盖的常用字段（见 run_5r.py 配置区全文）：
   ROLES / PACKAGE / FUBEN69NEW_PLAN / ZHUOGUI_ROUNDS / ZHUAGUI_OVERRIDE /
-  MUMU_MANAGER / LAUNCH_STAGGER / TIMEOUTS / SOLO_ENTRIES / KEJU_AI /
+  MUMU_MANAGER / LAUNCH_STAGGER / TIMEOUTS / SOLO_ENTRIES / SOLO_MAP / KEJU_AI /
   DEFAULT_OVERRIDES /
   WIN_IP / MAC_IP / ADB_SERVER_PORT / MUMU_API_PORT / CLI_API_PORT /
   REMOTE_PROBE_TIMEOUT / SHARED_TOKEN
@@ -59,8 +59,8 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
     "start": 600, "chuangjianduiwu": 180, "duizhang": 600,
     "fuben_per": 1800, "zhuogui": 1800,
     "duizhang_TR": 300, "duiyuan": 14400,
-    "solo": 2400, "solo_overall": 7200,
-    "bangpai_renwu": 3600, "zhuagui": 14400,
+    "solo": 2400, "solo_overall": 10800,
+    "bangpai_renwu": 3600, "zhuagui": 28800,
 }
 
 # 单人任务列表（任务间由 run_5r.solo_all 自动插 barrier：sleep5 + 打开大地图重置位置，
@@ -71,11 +71,22 @@ SOLO_ENTRIES = ["5R_duiyuan_tuichuduiwu", "shuangbei", "huoli", "fuli_qiandao", 
                 "mijing_renwu", "sanjieqiyuan",
                 "zhengli_baibao", "jiayuan_zhengli", "zhanghao_xinxi", "jialan", "baitanchushou"]
 if datetime.now().weekday() == 3:
+    SOLO_ENTRIES.insert(1, "bangpai_qiandao")
     SOLO_ENTRIES.insert(1, "bangpai_renwu")
+    
 if datetime.now().weekday() < 5:    # 工作日
     # SOLO_ENTRIES.insert(0, "kejuxiangshi")
     SOLO_ENTRIES.append("kejuxiangshi")
-    
+
+SOLO_MAP = {
+    "队长": SOLO_ENTRIES,
+    "欢喜": SOLO_ENTRIES,
+    "梦蝶": SOLO_ENTRIES,
+    "六仔": SOLO_ENTRIES,
+    "离歌": SOLO_ENTRIES,
+}
+# SOLO_MAP 支持每账号定制 solo 任务列表（key=角色名，同上方 ROLES）；未列出的角色/空列表
+# 回退 SOLO_ENTRIES。命令行显式给任务名（solo <任务名...>）时 SOLO_MAP 不生效，全员同一列表。
 
 # 科举乡试 AI 答题凭证（deepseek，openai 兼容端点）。apikey 从 .env 的 OPENAI_KEY 读
 # （run_5r 的 _load_dotenv 已加载进 os.environ）。留空则走 pipeline 默认普通答题。
