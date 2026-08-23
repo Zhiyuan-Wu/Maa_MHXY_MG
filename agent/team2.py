@@ -80,10 +80,10 @@ if datetime.now().weekday() < 5:    # 工作日
 
 SOLO_MAP = {
     "队长": SOLO_ENTRIES,
-    "欢喜": SOLO_ENTRIES,
-    "梦蝶": SOLO_ENTRIES,
+    "欢喜": ["huoli_linshifu"] + SOLO_ENTRIES,
+    "梦蝶": ["huoli_linshifu"] + SOLO_ENTRIES,
     "六仔": SOLO_ENTRIES,
-    "离歌": SOLO_ENTRIES,
+    "离歌": ["huoli_linshifu"] + SOLO_ENTRIES,
 }
 # SOLO_MAP 支持每账号定制 solo 任务列表（key=角色名，同上方 ROLES）；未列出的角色/空列表
 # 回退 SOLO_ENTRIES。命令行显式给任务名（solo <任务名...>）时 SOLO_MAP 不生效，全员同一列表。

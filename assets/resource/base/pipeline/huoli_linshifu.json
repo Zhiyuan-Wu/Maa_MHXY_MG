@@ -1,0 +1,91 @@
+{
+    "huoli_linshifu": {
+        "next": [
+            "[JumpBack]关闭整点活动弹窗",
+            "打开人物界面-过渡_linshifu",
+            "[JumpBack]panduan_zhujiemian"
+        ]
+    },
+    "打开人物界面-过渡_linshifu": {
+        "recognition": "TemplateMatch",
+        "template": [
+            "zonghe/chenghao.png",
+            "zonghe/jiahao.png"
+        ],
+        "roi": [
+            1206,
+            637,
+            66,
+            57
+        ],
+        "pre_delay": 1000,
+        "action": "ClickKey",
+        "key": [
+            57,
+            51
+        ],
+        "post_delay": 2000,
+        "next": [
+            "打开人物界面-成功_linshifu",
+            "[JumpBack]人物界面-按键打开失败-点击图标_linshifu"
+        ]
+    },
+    "人物界面-按键打开失败-点击图标_linshifu": {
+        "max_hit": 1,
+        "action": "Click",
+        "target": [
+            1185,
+            5,
+            91,
+            92
+        ],
+        "post_delay": 1000
+    },
+    "打开人物界面-成功_linshifu": {
+        "recognition": "OCR",
+        "expected": [
+            "人物属性"
+        ],
+        "roi": [
+            531,
+            3,
+            175,
+            60
+        ],
+        "next": [
+            "点击活力使用_linshifu"
+        ]
+    },
+    "点击活力使用_linshifu": {
+        "recognition": "OCR",
+        "expected": [
+            "使用"
+        ],
+        "roi": [
+            977,
+            232,
+            120,
+            71
+        ],
+        "pre_delay": 500,
+        "action": "Click",
+        "next": [
+            "[JumpBack]点击临时符_linshifu",
+            "panduan_zhujiemian"
+        ]
+    },
+    "点击临时符_linshifu": {
+        "max_hit": 4,
+        "recognition": "OCR",
+        "expected": [
+            "制作"
+        ],
+        "roi": [
+            904,
+            409,
+            125,
+            61
+        ],
+        "action": "Click"
+    }
+}
