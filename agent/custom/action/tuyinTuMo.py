@@ -115,6 +115,8 @@ class TuyinTuMo(CustomAction):
         "popup_template": "<abs>/tuoyin.png"
         "degree_roi": [775, 526, 60, 34]   # 完成度百分比 OCR 区（右下角）
         "confirm_target": [769, 586, 88, 35]  # 「完成」按钮 [x,y,w,h]
+        "huanzhi_roi": [490, 586, 100, 37]    # 「换纸」按钮 OCR 区（兜底首选：点它换新纸直接返回）
+        "close_target": [999, 70, 14, 13]     # 「关闭」按钮 [x,y,w,h]（兜底次选：换纸不在时点它+fallback）
         "stroke_speed_px_s": 100           # 涂墨移动速度（像素/秒）
         "inter_stroke_ms": 200             # 笔间隔
         "max_rounds": 3                    # 完成度不达标时最多整轮重涂次数
@@ -132,8 +134,66 @@ class TuyinTuMo(CustomAction):
     _DEFAULT_POPUP_ROI = [208, 88, 224, 394]
     _DEFAULT_DEGREE_ROI = [775, 526, 60, 34]
     _DEFAULT_CONFIRM = [769, 586, 88, 35]
+    _DEFAULT_HUANZHI_ROI = [490, 586, 100, 37]  # 「换纸」按钮 OCR 区（轮次耗尽时的首选出路）
+    _DEFAULT_CLOSE = [999, 70, 14, 13]          # 弹窗右上角「关闭」（换纸不在时的次选出路）
     _RECO_NODE = "tuyinTuMo-弹窗确认"
     _DEGREE_NODE = "tuyinTuMo-完成度回读"
+    _HUANZHI_NODE = "tuyinTuMo-换纸识别"
+
+    def _bailout(self, context, ctrl, huanzhi_roi, close, fallback, reason, n=0.0):
+        """轮次耗尽的兜底出路（两选一，优先换纸）：
+
+        1. **换纸**：OCR ``huanzhi_roi`` 识别「换纸」按钮，在场 → 点击它。换纸后游戏换一张
+           新的字重开涂墨考验——弹窗被游戏自身流程消化，**直接返回**（不点关闭、不跑
+           fallback）：外层 pipeline 的下一轮 tuoyinjiance 会重新走"弹窗识别→涂墨"，等于
+           把重试机会交还给编排层。
+        2. **关闭 + fallback**：换纸不在（OCR miss）→ 点弹窗右上角「关闭」退出弹窗（防弹窗
+           留场堵后续任务入口），再跑 ``fallback``（panduan_zhujiemian 清场回主界面）。
+        """
+        image = None
+        try:
+            image = ctrl.post_screencap().wait().get()
+        except Exception:
+            pass
+        if image is not None:
+            hz = context.run_recognition(
+                self._HUANZHI_NODE,
+                image,
+                pipeline_override={self._HUANZHI_NODE: {
+                    "recognition": "OCR",
+                    "expected": ["换纸"],
+                    "roi": huanzhi_roi,
+                    "threshold": 0.6,
+                }},
+            )
+            if hz and hz.hit:
+                box = hz.best_result.box  # [x, y, w, h] 识别框
+                if n > 0:
+                    fx = box[0] + box[2] * random.uniform(0.3, 0.7)
+                    fy = box[1] + box[3] * random.uniform(0.3, 0.7)
+                else:
+                    fx, fy = box[0] + box[2] / 2, box[1] + box[3] / 2
+                logger.info(f"[tuyinTuMo] {reason} → 点「换纸」({int(fx)},{int(fy)})，换纸后直接返回")
+                ctrl.post_click(int(fx), int(fy)).wait()
+                time.sleep(1.0)   # 等换纸动画（新石碑弹出）
+                return
+        # 换纸不在场 → 点关闭退弹窗 + fallback 清场
+        logger.info(f"[tuyinTuMo] {reason} → 「换纸」不在场，点关闭({close}) + 回退 {fallback}")
+        cx_, cy_, cw_, ch_ = close
+        if n > 0:
+            fx = cx_ + cw_ * random.uniform(0.3, 0.7)
+            fy = cy_ + ch_ * random.uniform(0.3, 0.7)
+        else:
+            fx, fy = cx_ + cw_ / 2, cy_ + ch_ / 2
+        try:
+            ctrl.post_click(int(fx), int(fy)).wait()
+            time.sleep(1.0)   # 等弹窗收起
+        except Exception as e:
+            logger.warning(f"[tuyinTuMo] 点关闭异常（继续 fallback）：{e}")
+        try:
+            context.run_task(fallback)
+        except Exception as e:
+            logger.warning(f"[tuyinTuMo] 回退 {fallback} 异常：{e}")
 
     def run(
         self,
@@ -152,6 +212,8 @@ class TuyinTuMo(CustomAction):
         popup_template = p.get("popup_template", _DEFAULT_TEMPLATE)
         degree_roi = p.get("degree_roi", self._DEFAULT_DEGREE_ROI)
         confirm = p.get("confirm_target", self._DEFAULT_CONFIRM)
+        huanzhi_roi = p.get("huanzhi_roi", self._DEFAULT_HUANZHI_ROI)
+        close = p.get("close_target", self._DEFAULT_CLOSE)
         speed = float(p.get("stroke_speed_px_s", 100))
         inter_ms = int(p.get("inter_stroke_ms", 200))
         max_rounds = int(p.get("max_rounds", 3))
@@ -344,15 +406,12 @@ class TuyinTuMo(CustomAction):
                 time.sleep(0.5)
                 continue
             if percent is not None and percent < done_th:
-                # 未达标且轮次已尽 → 不点「完成」（0% 提交=浪费挑战次数），回退
-                logger.warning(
-                    f"[tuyinTuMo] {max_rounds} 轮涂完仍只有 {percent}%（阈值 {done_th}%），"
-                    f"回退 {fallback}"
+                # 未达标且轮次已尽 → 不点「完成」（0% 提交=浪费挑战次数）；
+                # 兜底：优先「换纸」直接返回，换纸不在才点关闭 + fallback
+                self._bailout(
+                    context, ctrl, huanzhi_roi, close, fallback,
+                    reason=f"{max_rounds} 轮涂完仍只有 {percent}%（阈值 {done_th}%）", n=n,
                 )
-                try:
-                    context.run_task(fallback)
-                except Exception as e:
-                    logger.warning(f"[tuyinTuMo] 回退 {fallback} 异常：{e}")
                 return CustomAction.RunResult(success=False)
             # 达标（或完成度读不到 = 弹窗可能已过）→ 点「完成」提交
             # ---- noise ④：按钮去中心化（30%~70% 区间随机落点，避开正中心指纹）----
@@ -367,11 +426,10 @@ class TuyinTuMo(CustomAction):
             time.sleep(3.0)
             return CustomAction.RunResult(success=True)
 
-        logger.warning(f"[tuyinTuMo] {max_rounds} 轮后仍未达标，回退 {fallback}")
-        try:
-            context.run_task(fallback)
-        except Exception as e:
-            logger.warning(f"[tuyinTuMo] 回退 {fallback} 异常：{e}")
+        self._bailout(
+            context, ctrl, huanzhi_roi, close, fallback,
+            reason=f"{max_rounds} 轮后仍未达标", n=n,
+        )
         return CustomAction.RunResult(success=False)
 
     @staticmethod
