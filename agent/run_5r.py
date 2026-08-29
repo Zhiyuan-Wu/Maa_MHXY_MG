@@ -236,6 +236,7 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
     "solo": 2400,          # 单个 solo 任务的墙钟超时
     "solo_overall": 10800,  # 整轮 solo（全部账号×全部任务）的墙钟总超时；到点未完则收口退出
     "bangpai_renwu": 3600,
+    "tuoyinjiance": 900,   # 拓印检测：导航到活动+弹窗涂墨（≤3轮）；弹窗不在场时秒退，900s 上限够宽
     "zhuagui": 28800,      # 队长无限捉鬼的墙钟安全帽（8h）；实际靠 Ctrl+C 停，到点 post_stop 收口
 }
 # 单人任务列表（任务间自动插 barrier：solo_all 每个entry前 sleep5 + 打开大地图重置位置，
@@ -351,6 +352,7 @@ SOLO_TASKS_HELP = {
     "sanjieqiyuan": "三界奇缘（答题）",
     "shimen_renwu": "师门任务",
     "mijing_renwu": "秘境降妖",
+    "tuoyinjiance": "拓印检测（秘境降妖拓印考验）",
     "chushoushanghui": "出售商会",
     "jiayuan_zhengli": "家园整理",
     "chongwuqifu": "宠物祈福",
@@ -1586,13 +1588,14 @@ def _parse_ids_flag(args):
 
 
 def print_help():
-    print("用法: python run_5r.py [full|launch|team|form|run|zhuagui|solo [任务名...] [--ids 1,3,5] | help]")
-    print("  full    ensure 实例→连接→启动5个→组队→副本+解散→并行单人→关掉全部实例")
+    print("用法: python run_5r.py [full|launch|team|form|run|zhuagui|checkin|solo [任务名...] [--ids 1,3,5] | help]")
+    print("  full    ensure 实例→连接→启动5个→拓印检测×2→组队→副本+解散→并行单人→关掉全部实例")
     print("  launch  只启动+登录 5 个账号")
     print("  team    完整5人任务：启动 + 组队 + 副本+解散")
     print("  form    启动登录 + 只组队（逐个邀请，首次自动建队），到全员入队即停（测组队用）")
     print("  run     只执行副本+解散（前提：已组好队；不启动登录）")
     print("  zhuagui 队长单人无限捉鬼（关闭人员检测-不进入轮次选择）；登录队长→无限捉鬼，Ctrl+C 停")
+    print("  checkin 启动5个→全员并行拓印检测（tuoyinjiance）×2→关掉全部实例")
     print("  solo    并行单人：任务名指定只跑哪些；--ids 指定账号(1-based，默认全部)")
     print("          例: solo baotu_renwu                # 5 账号都跑宝图")
     print("              solo baotu_renwu --ids 1,3,5    # 只在账号 1/3/5 跑宝图")
@@ -1619,7 +1622,7 @@ _LOG_ANALYSIS_LIM = {
     "shuangbei": 60, "fuli_qiandao": 120, "shimen_renwu": 600, "yunbiao_renwu2": 1000,
     "baotu_renwu": 1000, "打开大地图_69副本": 60, "mijing_renwu": 2100, "sanjieqiyuan": 200,
     "huoyue_lingqu": 60, "zhengli_baibao": 150, "jiayuan_zhengli": 150, "huoli": 120,
-    "kejuxiangshi": 300, "zhanghao_xinxi": 60,
+    "kejuxiangshi": 300, "zhanghao_xinxi": 60, "tuoyinjiance": 600,
 }
 
 
@@ -1894,12 +1897,22 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
     print("=== 连接 5 设备（共享 Resource）===")
     taskers = connect_all(roles, package=package)
 
-    if mode in ("full", "launch", "team", "form"):
+    if mode in ("full", "launch", "team", "form", "checkin"):
         # 并行启动、每个相隔 LAUNCH_STAGGER 秒（错峰）。设 0 即齐发。各账号独立 Resource，
         # 已无 OCR 并发竞态；错峰仅为平滑宿主负载（避免 5 个 StartApp/游戏同时拉起压满 CPU/磁盘）。
         # wall-clock 从 N×单账号降到 stagger×(N-1) + 单账号。
         print(f"=== 启动 {len(taskers)} 个账号（并行，每个间隔 {LAUNCH_STAGGER}s）===")
         launch_parallel(taskers, package=package, timeout=timeouts["start"], stagger=LAUNCH_STAGGER)
+
+    if mode in ("full", "checkin"):
+        # 拓印检测（秘境降妖拓印考验）：全员并行各跑两遍 tuoyinjiance。弹窗非必现、涂墨
+        # 一轮未必达标（done_threshold=60），跑两遍提高覆盖率；重复列表项各是一次独立
+        # post_task，tuoyinjiance 的 max_hit:1 不会挡第二遍（计数 per post_task）。
+        # full 模式在组队/队长任务**之前**跑——拓印考验弹窗若在场会堵副本入口（08-24 job2
+        # 实证），先消化掉再进队；checkin 模式则是独立入口（launch→拓印×2→收尾关实例）。
+        print("=== 拓印检测 ×2（全员并行）===")
+        solo_all(taskers, entries=["tuoyinjiance", "tuoyinjiance"],
+                 per_timeout=timeouts.get("tuoyinjiance", timeouts["solo"]))
 
     if mode == "zhuagui":
         # 队长单人无限捉鬼：只需队长登录到主界面（关闭人员检测 → 不要求队伍满员），
@@ -1937,8 +1950,8 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
                  solo_timeouts={e: timeouts.get(e, timeouts["solo"])
                                 for e in all_entries if e in timeouts})
 
-    # full 模式跑完
-    if mode == "full":
+    # full/checkin 模式跑完：关掉全部实例释放内存
+    if mode in ("full", "checkin"):
         # to_stop = sorted(i for r, i in role_idx.items() if r != "队长")
         to_stop = sorted(i for r, i in role_idx.items())
         if to_stop:
@@ -2404,7 +2417,7 @@ class _CliHandler(BaseHTTPRequestHandler):
                         _send_err(self, 409, f"busy: job {_CURRENT_JOB_ID} running；先 POST /jobs/{_CURRENT_JOB_ID}/cancel")
                         return
                 mode = body.get("mode", "full")
-                if mode not in ("full", "launch", "team", "form", "run", "fuben", "zhuagui", "solo", "log_analysis"):
+                if mode not in ("full", "launch", "team", "form", "run", "fuben", "zhuagui", "solo", "checkin", "log_analysis"):
                     _send_err(self, 400, f"bad mode {mode}"); return
                 job_id = datetime.now().strftime("%Y%m%d_%H%M%S")
                 with _JOBS_LOCK:
@@ -2575,7 +2588,7 @@ if __name__ == "__main__":
         sys.exit(_remote_client(_args[1:]))
     _exit_code = 0
     try:
-        if _mode in ("full", "launch", "team", "form", "run", "fuben", "zhuagui"):
+        if _mode in ("full", "launch", "team", "form", "run", "fuben", "zhuagui", "checkin"):
             main(_mode)
         elif _mode == "solo":
             _ids, _tasks = _parse_ids_flag(_args[1:])
