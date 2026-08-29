@@ -43,7 +43,7 @@ FUBEN69NEW_PLAN = [
 ]
 
 # 副本完成、桥接捉鬼后跑几轮鬼。注意 **实际轮数 = max_hit + 1**（详见 run_5r.py 注释）。
-ZHUOGUI_ROUNDS = 2
+ZHUOGUI_ROUNDS = 5
 
 # 队长单人无限捉鬼模式的 override（``python run_5r.py --config team2 zhuagui`` 用）。
 ZHUAGUI_OVERRIDE = {
@@ -60,7 +60,7 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
     "fuben_per": 1800, "zhuogui": 1800,
     "duizhang_TR": 300, "duiyuan": 14400,
     "solo": 2400, "solo_overall": 10800,
-    "bangpai_renwu": 3600, "zhuagui": 28800,
+    "bangpai_renwu": 2400, "zhuagui": 28800,
 }
 
 # 单人任务列表（任务间由 run_5r.solo_all 自动插 barrier：sleep5 + 打开大地图重置位置，
@@ -70,7 +70,7 @@ SOLO_ENTRIES = ["5R_duiyuan_tuichuduiwu", "shuangbei", "huoli", "fuli_qiandao", 
                 "baotu_renwu", "wabaotu_qingli",
                 "mijing_renwu", "sanjieqiyuan",
                 "zhengli_baibao", "jiayuan_zhengli", "zhanghao_xinxi", "jialan", "baitanchushou"]
-if datetime.now().weekday() == 3:
+if datetime.now().weekday() in [3, 4]:
     SOLO_ENTRIES.insert(1, "bangpai_qiandao")
     SOLO_ENTRIES.insert(1, "bangpai_renwu")
     

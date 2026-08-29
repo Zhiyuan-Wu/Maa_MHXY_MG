@@ -208,7 +208,7 @@ FUBEN69NEW_PLAN = [
 # 启动（不耗计数器），抓鬼轮次计算-max 在每轮末尾命中一次再启下一轮——故 4 轮对应 max_hit=3。
 # standalone 的 post_task 不读 interface.json option，base 默认不挂限轮器（抓鬼一轮完成→队伍满员判断
 # 会无限循环），故 team_run 必须显式把 抓鬼一轮完成.next 改写到 抓鬼轮次计算-max。
-ZHUOGUI_ROUNDS = 4
+ZHUOGUI_ROUNDS = 5
 
 # 队长单人无限捉鬼模式的 override（``python run_5r.py zhuagui``）—— 对应 interface.json option
 # 「（开启/关闭）人员检测-（是否）进入轮次选择」→「关闭人员检测-不进入轮次选择」。
@@ -235,7 +235,7 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
     "duizhang_TR": 300, "duiyuan": 14400,   # 队员覆盖整段 5本+捉鬼（≤4h）
     "solo": 2400,          # 单个 solo 任务的墙钟超时
     "solo_overall": 10800,  # 整轮 solo（全部账号×全部任务）的墙钟总超时；到点未完则收口退出
-    "bangpai_renwu": 3600,
+    "bangpai_renwu": 2400,
     "tuoyinjiance": 900,   # 拓印检测：导航到活动+弹窗涂墨（≤3轮）；弹窗不在场时秒退，900s 上限够宽
     "zhuagui": 28800,      # 队长无限捉鬼的墙钟安全帽（8h）；实际靠 Ctrl+C 停，到点 post_stop 收口
 }
@@ -244,7 +244,7 @@ TIMEOUTS = {                           # 各步墙钟超时（秒）
 SOLO_ENTRIES = ["5R_duiyuan_tuichuduiwu", "shuangbei", "huoli", "fuli_qiandao", "shimen_renwu_new", "yunbiao_renwu2", "baotu_renwu", "wabaotu_qingli",
                 "mijing_renwu", "sanjieqiyuan", "zhengli_baibao", "jiayuan_zhengli", "huoli", "zhanghao_xinxi", "jialan", "baitanchushou"]
 
-if datetime.now().weekday() == 3:
+if datetime.now().weekday() in [3, 4]:
     SOLO_ENTRIES.insert(1, "bangpai_qiandao")
     SOLO_ENTRIES.insert(1, "bangpai_renwu")
     
