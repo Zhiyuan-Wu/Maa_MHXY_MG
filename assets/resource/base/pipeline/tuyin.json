@@ -64,7 +64,7 @@
             "fallback_entry": "panduan_zhujiemian"
         }
     },
-    "秘境-拓印检测": {
+    "tuoyinjiance": {
         "max_hit": 1,
         "pre_delay": 500,
         "next": [
