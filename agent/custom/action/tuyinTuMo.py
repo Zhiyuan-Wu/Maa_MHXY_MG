@@ -15,6 +15,7 @@ pipeline 无对应节点会 20s 超时 → 空节点假成功（08-24 job2 侠�
 """
 import json
 import os
+import random
 import time
 
 from maa.agent.agent_server import AgentServer
@@ -31,6 +32,73 @@ _REPO_DIR = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", ".."))
 _DEFAULT_TEMPLATE = os.path.join(
     _REPO_DIR, "assets", "resource", "base", "image", "zonghe", "tuoyin.png"
 )
+
+
+# ---------------- 人手噪声（noise 系数 0 = 完全旧行为） ----------------
+# 目的：打掉"每次执行逐字节相同"的机器人指纹。四类噪声都只动**表现层**（触点坐标/
+# 时序/笔画分组/按钮点位），不动识别参数（color/tolerance/cell —— 动它们会伤识别稳定性）。
+# 约束（见 memory tuyin-touch-gesture-needs-small-steps）：相邻触点仍须 ≤10px 连续小步，
+# 故抖动幅度 ≤2px、且以"抖动后的顶点"做插值（插值点自身只 ±1px 微抖，不会破坏连续性）。
+
+
+def _jit(p: tuple[int, int], amp: float) -> tuple[int, int]:
+    """坐标抖动：p 加 ±amp px 随机偏移（amp=0 原样返回）。"""
+    if amp <= 0:
+        return (int(p[0]), int(p[1]))
+    return (
+        int(round(p[0] + random.uniform(-amp, amp))),
+        int(round(p[1] + random.uniform(-amp, amp))),
+    )
+
+
+def _merge_pair(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """两笔连成一笔（a → b），中间可随机反转 b 让连接更顺（像人写连笔挑顺手方向）。
+
+    与超预算尾部合并同机制：纯点列首尾相接，共享一次 down/up；连接线是两笔端点的
+    直线插值，端点都在石碑 ROI 内 → 连接线也在 ROI 凸包内，不会画出弹窗。
+    孤立点（首尾重合的占位 double-append）沿用尾部合并的占位语义。
+    """
+    if random.random() < 0.5:
+        b = list(reversed(b))
+    return list(a) + list(b)
+
+
+def _random_merge(
+    strokes: list[list[tuple[int, int]]], noise: float
+) -> tuple[list[list[tuple[int, int]]], list[str]]:
+    """随机挑 1-2 对笔画连成一笔（连笔），偏向端点近的对（人连笔连相邻笔画）。
+
+    返回（新笔画列表, 变更说明）供日志。只有 <2 笔 / noise=0 时原样返回。
+    每次执行的合并对数、挑中谁、是否反转都是随机的 → down/up 次数与分组结构
+    每轮不同（结构级指纹，比逐像素抖动更难被识别）。
+    """
+    if noise <= 0 or len(strokes) < 2:
+        return strokes, []
+    out = [list(s) for s in strokes]
+    notes: list[str] = []
+    n_pairs = random.randint(1, 2)
+    for _ in range(n_pairs):
+        if len(out) < 2:
+            break
+        # 候选 = 所有余笔对，按"尾→头直线距离"升序；距离本身带随机扰动，
+        # 让"最近对"不总被选中（多数时候近、偶尔远——像人偶尔跨笔连）。
+        pairs = []
+        for i in range(len(out)):
+            for j in range(len(out)):
+                if i == j:
+                    continue
+                d = ((out[i][-1][0] - out[j][0][0]) ** 2
+                     + (out[i][-1][1] - out[j][0][1]) ** 2) ** 0.5
+                pairs.append((d * random.uniform(0.6, 1.6), i, j))
+        pairs.sort()
+        _, i, j = pairs[0]
+        merged = _merge_pair(out[i], out[j])
+        notes.append(f"#{j + 1}→#{i + 1}" + ("(反)" if random.random() < 0.5 else ""))
+        # 先删大索引再删小索引，避免索引位移
+        for k in sorted((i, j), reverse=True):
+            del out[k]
+        out.insert(min(i, j), merged)
+    return out, notes
 
 
 @AgentServer.custom_action("tuyinTuMo")
@@ -52,6 +120,11 @@ class TuyinTuMo(CustomAction):
         "max_rounds": 3                    # 完成度不达标时最多整轮重涂次数
         "done_threshold": 70               # 判定通过的完成度（%）
         "fallback_entry": "panduan_zhujiemian"  # 全部失败后的回退 entry
+        "noise": 1.0                       # 人手噪声系数 0.0~1.0（0=完全旧行为，可回退）：
+                                           #   ① 触点 ±1px / 拐点 ±2px 坐标抖动
+                                           #   ② 速度/停顿/步进时序抖动
+                                           #   ③ 随机合并 1-2 对笔画（连笔，像尾部合并共享 down/up）
+                                           #   ④ 「完成」按钮点击去中心化
     """
 
     _DEFAULT_ROI = [508, 189, 331, 336]
@@ -88,6 +161,10 @@ class TuyinTuMo(CustomAction):
         # 笔画数超过预算时不逐笔画，而是把后续笔画首尾相连合并进同一笔
         # （共享同一次 down/up）—— 保证总点击数 ≤ 预算。
         click_budget = int(p.get("click_budget", 6))
+        # 人手噪声系数（0.0~1.0）：坐标/时序抖动 + 随机连笔 + 按钮去中心化。
+        # 0 = 完全旧行为（出问题一键回退）。
+        noise = float(p.get("noise", 1.0))
+        n = max(0.0, min(1.0, noise))
 
         ctrl = context.tasker.controller
 
@@ -126,6 +203,17 @@ class TuyinTuMo(CustomAction):
 
             # 笔画路径是 ROI 相对坐标，必须换算成屏幕绝对坐标再下发
             abs_strokes = strokes.absolute(roi)
+            # ---- noise ③：随机合并 1-2 对笔画（连笔，同尾部合并共享 down/up）----
+            merge_notes: list[str] = []
+            if n > 0:
+                abs_strokes, merge_notes = _random_merge(abs_strokes, n)
+            # ---- noise ①：拐点坐标抖动（±2px 内，插值步长 ≤10px 约束仍满足）----
+            if n > 0:
+                abs_strokes = [
+                    [_jit(pt, 2.0 * n) if k in (0, len(s) - 1) else _jit(pt, 1.0 * n)
+                     for k, pt in enumerate(s)]
+                    for s in abs_strokes
+                ]
             logger.info(
                 f"[tuyinTuMo] 第{round_i}轮识别：{len(abs_strokes)} 笔, "
                 f"覆盖 {strokes.coverage_ratio * 100:.0f}%, 绝对坐标: "
@@ -133,6 +221,7 @@ class TuyinTuMo(CustomAction):
                     f"笔{i + 1}[{len(s)}点:{s[0]}→{s[-1]}]"
                     for i, s in enumerate(abs_strokes)
                 )
+                + (f"，连笔: {','.join(merge_notes)}" if merge_notes else "")
             )
 
             # ③ 涂墨：每笔一次点击（touch_down → 组内插值 touch_move → touch_up）。
@@ -189,28 +278,51 @@ class TuyinTuMo(CustomAction):
             for gi, g in enumerate(groups):
                 if not g:
                     continue
+                # ---- noise ②：本笔时序抖动（速度 ±20%、down 停留 0.10~0.25s）----
+                g_speed = speed * random.uniform(0.85, 1.2) if n > 0 else speed
+                down_hold = random.uniform(0.10, 0.25) if n > 0 else 0.15
+                # 偶发"迟疑"：一笔中随机挑一个点换腕停顿（人手特征）
+                hesitate_at = (
+                    random.randrange(len(g)) if n > 0 and len(g) > 3 and random.random() < 0.35
+                    else -1
+                )
                 logger.info(
                     f"[tuyinTuMo] 组{gi + 1}: down({g[0][0]},{g[0][1]}) → "
                     f"{len(g) - 1} 段 → up"
+                    + (f"（{g_speed:.0f}px/s）" if n > 0 else "")
                 )
                 ctrl.post_touch_down(g[0][0], g[0][1]).wait()
-                time.sleep(0.15)
+                time.sleep(down_hold)
                 prev = g[0]
-                for (x2, y2) in g[1:]:
+                for step_i, (x2, y2) in enumerate(g[1:]):
                     x1, y1 = prev
                     seg_px = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
-                    n_steps = max(1, int(seg_px / max_step_px))
+                    # ceil：10~20px 的短段（RDP 拐点相邻/随机合并的跨笔连接线）也给 ≥2 步，
+                    # 否则 int(19/10)=1 步 → 单步 19px 跳变（旧代码固有，随机合并放大了概率）
+                    n_steps = max(1, -(-seg_px // max_step_px))
                     for k in range(1, n_steps + 1):
                         t = k / n_steps
-                        mx = int(round(x1 + (x2 - x1) * t))
-                        my = int(round(y1 + (y2 - y1) * t))
+                        # ---- noise ①：插值点 ±1px 微抖（步长 ≤10px 约束下安全）----
+                        jx = random.uniform(-1.0, 1.0) * n
+                        jy = random.uniform(-1.0, 1.0) * n
+                        mx = int(round(x1 + (x2 - x1) * t + jx))
+                        my = int(round(y1 + (y2 - y1) * t + jy))
                         ctrl.post_touch_move(mx, my).wait()
-                        time.sleep(min(0.05, (seg_px / n_steps) / speed))
+                        step_delay = min(0.05, (seg_px / n_steps) / g_speed)
+                        if n > 0:
+                            step_delay *= random.uniform(0.8, 1.2)
+                        time.sleep(step_delay)
                     if (x2, y2) in held_pts:
                         time.sleep(0.3)  # 孤立点：到达后停留（点按）
+                    if step_i == hesitate_at:
+                        time.sleep(random.uniform(0.08, 0.2))
                     prev = (x2, y2)
                 ctrl.post_touch_up().wait()
-                time.sleep(inter_ms / 1000.0)
+                inter = inter_ms
+                if n > 0:
+                    # ---- noise ②：笔间隔 150~350ms ----
+                    inter = int(inter_ms * random.uniform(0.75, 1.75))
+                time.sleep(inter / 1000.0)
 
             # ④ 回读完成度：达标或已到最后一轮 → 点「完成」
             image2 = ctrl.post_screencap().wait().get()
@@ -243,8 +355,14 @@ class TuyinTuMo(CustomAction):
                     logger.warning(f"[tuyinTuMo] 回退 {fallback} 异常：{e}")
                 return CustomAction.RunResult(success=False)
             # 达标（或完成度读不到 = 弹窗可能已过）→ 点「完成」提交
+            # ---- noise ④：按钮去中心化（30%~70% 区间随机落点，避开正中心指纹）----
             tx, ty, tw, th = confirm
-            ctrl.post_click(int(tx + tw / 2), int(ty + th / 2)).wait()
+            if n > 0:
+                cx = tx + tw * random.uniform(0.3, 0.7)
+                cy = ty + th * random.uniform(0.3, 0.7)
+            else:
+                cx, cy = tx + tw / 2, ty + th / 2
+            ctrl.post_click(int(cx), int(cy)).wait()
             logger.info("[tuyinTuMo] 已点「完成」提交")
             time.sleep(3.0)
             return CustomAction.RunResult(success=True)
