@@ -375,6 +375,7 @@
         "pre_delay": 1000,
         "action": "Click",
         "next": [
+            "[JumpBack]关闭整点活动弹窗",
             "[JumpBack]捉鬼-领取双倍点数弹窗",
             "抓鬼一轮完成",
             "[JumpBack]自动寻路中-图片识别",
