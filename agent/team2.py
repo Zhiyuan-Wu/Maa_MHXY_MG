@@ -43,7 +43,7 @@ FUBEN69NEW_PLAN = [
 ]
 
 # 副本完成、桥接捉鬼后跑几轮鬼。注意 **实际轮数 = max_hit + 1**（详见 run_5r.py 注释）。
-ZHUOGUI_ROUNDS = 5
+ZHUOGUI_ROUNDS = 5 if datetime.now().weekday() not in [3, 4] else 4
 
 # 队长单人无限捉鬼模式的 override（``python run_5r.py --config team2 zhuagui`` 用）。
 ZHUAGUI_OVERRIDE = {

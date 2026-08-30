@@ -73,7 +73,7 @@
                     75,
                     79
                 ],
-                "threshold": 0.8
+                "threshold": 0.6
             }
         ],
         "pre_delay": 500,

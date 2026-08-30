@@ -58,7 +58,7 @@
             ],
             "stroke_speed_px_s": 100,
             "inter_stroke_ms": 200,
-            "max_rounds": 3,
+            "max_rounds": 2,
             "done_threshold": 60,
             "click_budget": 7,
             "fallback_entry": "panduan_zhujiemian"

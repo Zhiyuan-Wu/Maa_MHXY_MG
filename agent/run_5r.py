@@ -208,7 +208,7 @@ FUBEN69NEW_PLAN = [
 # 启动（不耗计数器），抓鬼轮次计算-max 在每轮末尾命中一次再启下一轮——故 4 轮对应 max_hit=3。
 # standalone 的 post_task 不读 interface.json option，base 默认不挂限轮器（抓鬼一轮完成→队伍满员判断
 # 会无限循环），故 team_run 必须显式把 抓鬼一轮完成.next 改写到 抓鬼轮次计算-max。
-ZHUOGUI_ROUNDS = 5
+ZHUOGUI_ROUNDS = 5 if datetime.now().weekday() not in [3, 4] else 4
 
 # 队长单人无限捉鬼模式的 override（``python run_5r.py zhuagui``）—— 对应 interface.json option
 # 「（开启/关闭）人员检测-（是否）进入轮次选择」→「关闭人员检测-不进入轮次选择」。
