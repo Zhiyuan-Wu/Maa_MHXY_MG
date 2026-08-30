@@ -16,6 +16,7 @@ pipeline 无对应节点会 20s 超时 → 空节点假成功（08-24 job2 侠�
 import json
 import os
 import random
+import threading
 import time
 
 from maa.agent.agent_server import AgentServer
@@ -116,6 +117,7 @@ class TuyinTuMo(CustomAction):
         "degree_roi": [775, 526, 60, 34]   # 完成度百分比 OCR 区（右下角）
         "confirm_target": [769, 586, 88, 35]  # 「完成」按钮 [x,y,w,h]
         "huanzhi_roi": [490, 586, 100, 37]    # 「换纸」按钮 OCR 区（兜底首选：点它换新纸直接返回）
+        "huanzhi_limit": 5                    # 每账号换纸上限（类内计数，超限强制走关闭+回退）
         "close_target": [999, 70, 14, 13]     # 「关闭」按钮 [x,y,w,h]（兜底次选：换纸不在时点它+fallback）
         "stroke_speed_px_s": 100           # 涂墨移动速度（像素/秒）
         "inter_stroke_ms": 200             # 笔间隔
@@ -139,23 +141,65 @@ class TuyinTuMo(CustomAction):
     _RECO_NODE = "tuyinTuMo-弹窗确认"
     _DEGREE_NODE = "tuyinTuMo-完成度回读"
     _HUANZHI_NODE = "tuyinTuMo-换纸识别"
+    # 换纸次数上限（per 账号）：换纸只是"换张纸重涂"，不消耗失败次数但也不产出——
+    # 涂墨持续不达标时无限换纸 = 无限空转（08-30 X2400 同型风险）。超过上限强制走
+    # 关闭 + panduan_zhujiemian 有损退出，把控制权还给编排层。
+    _HUANZHI_LIMIT = 5
+    # 本类是 @AgentServer.custom_action 注册的单例，run_5r 下被 5 个并发 Tasker 共享同一实例
+    # （见 shimen_renwu.py _miss_streaks 同款坑）：换纸计数必须按 adb_serial 分桶 + 锁，
+    # 否则兄弟账号的换纸会互相吃掉额度、或一起把某个号顶到上限。
+    _HUANZHI_LOCK = threading.Lock()
+    _huanzhi_counts: dict = {}  # {adb_serial: 已换纸次数}
 
-    def _bailout(self, context, ctrl, huanzhi_roi, close, fallback, reason, n=0.0):
-        """轮次耗尽的兜底出路（两选一，优先换纸）：
+    @staticmethod
+    def _account_tag(context: Context) -> str:
+        """稳定的账号标识：优先 adb_serial（如 127.0.0.1:16512），回退 uuid，再回退 ?。
 
-        1. **换纸**：OCR ``huanzhi_roi`` 识别「换纸」按钮，在场 → 点击它。换纸后游戏换一张
-           新的字重开涂墨考验——弹窗被游戏自身流程消化，**直接返回**（不点关闭、不跑
-           fallback）：外层 pipeline 的下一轮 tuoyinjiance 会重新走"弹窗识别→涂墨"，等于
-           把重试机会交还给编排层。
-        2. **关闭 + fallback**：换纸不在（OCR miss）→ 点弹窗右上角「关闭」退出弹窗（防弹窗
+        与 ``logOcr._account_tag`` / ``shimen_renwu._account_tag`` 同款——通过 controller 的
+        C handle 查，不依赖 Python wrapper 对象身份，5 开并发下跨 run 调用稳定。
+        """
+        try:
+            ctrl = context.tasker.controller
+            serial = (ctrl.info or {}).get("adb_serial")
+            if serial:
+                return serial
+            return ctrl.uuid or "?"
+        except Exception as e:
+            logger.warning(f"[tuyinTuMo] 取账号标识失败: {type(e).__name__}: {e}")
+            return "?"
+
+    def _huanzhi_left(self, context: Context) -> int:
+        """读**本账号**的换纸剩余额度（不修改计数）。"""
+        tag = self._account_tag(context)
+        with self._HUANZHI_LOCK:
+            return max(0, self._HUANZHI_LIMIT - self._huanzhi_counts.get(tag, 0))
+
+    def _huanzhi_used_one(self, context: Context) -> None:
+        """记一次换纸（**本账号**计数 +1）。"""
+        tag = self._account_tag(context)
+        with self._HUANZHI_LOCK:
+            self._huanzhi_counts[tag] = self._huanzhi_counts.get(tag, 0) + 1
+
+    def _bailout(self, context, ctrl, huanzhi_roi, close, fallback, reason, n=0.0, huanzhi_limit=None):
+        """轮次耗尽的兜底出路（两选一，优先换纸；换纸每账号最多 ``huanzhi_limit`` 次）：
+
+        1. **换纸**：OCR ``huanzhi_roi`` 识别「换纸」按钮，在场**且本账号换纸额度未耗尽** →
+           点击它。换纸后游戏换一张新的字重开涂墨考验——弹窗被游戏自身流程消化，**直接返回**
+           （不点关闭、不跑 fallback）：外层 pipeline 的下一轮 tuoyinjiance 会重新走
+           "弹窗识别→涂墨"，等于把重试机会交还给编排层。额度用尽（涂墨持续不达标，换纸
+           无限循环空转风险，08-30 X2400 同型）→ 视同换纸不在场，强制走 ②。
+        2. **关闭 + fallback**：换纸不在（或额度已尽）→ 点弹窗右上角「关闭」退出弹窗（防弹窗
            留场堵后续任务入口），再跑 ``fallback``（panduan_zhujiemian 清场回主界面）。
         """
+        if huanzhi_limit is None:
+            huanzhi_limit = self._HUANZHI_LIMIT
+        left = self._huanzhi_left(context)
         image = None
         try:
             image = ctrl.post_screencap().wait().get()
         except Exception:
             pass
-        if image is not None:
+        if image is not None and left > 0:
             hz = context.run_recognition(
                 self._HUANZHI_NODE,
                 image,
@@ -173,11 +217,21 @@ class TuyinTuMo(CustomAction):
                     fy = box[1] + box[3] * random.uniform(0.3, 0.7)
                 else:
                     fx, fy = box[0] + box[2] / 2, box[1] + box[3] / 2
-                logger.info(f"[tuyinTuMo] {reason} → 点「换纸」({int(fx)},{int(fy)})，换纸后直接返回")
+                self._huanzhi_used_one(context)
+                used = huanzhi_limit - self._huanzhi_left(context)
+                logger.info(
+                    f"[tuyinTuMo] {reason} → 点「换纸」({int(fx)},{int(fy)})，换纸后直接返回"
+                    f"（已用 {used}/{huanzhi_limit}）"
+                )
                 ctrl.post_click(int(fx), int(fy)).wait()
                 time.sleep(1.0)   # 等换纸动画（新石碑弹出）
                 return
-        # 换纸不在场 → 点关闭退弹窗 + fallback 清场
+        if left <= 0:
+            logger.info(
+                f"[tuyinTuMo] {reason} → 换纸额度已用尽（{huanzhi_limit}/{huanzhi_limit}），"
+                f"强制走关闭 + 回退"
+            )
+        # 换纸不在场（或额度已尽）→ 点关闭退弹窗 + fallback 清场
         logger.info(f"[tuyinTuMo] {reason} → 「换纸」不在场，点关闭({close}) + 回退 {fallback}")
         cx_, cy_, cw_, ch_ = close
         if n > 0:
@@ -213,6 +267,7 @@ class TuyinTuMo(CustomAction):
         degree_roi = p.get("degree_roi", self._DEFAULT_DEGREE_ROI)
         confirm = p.get("confirm_target", self._DEFAULT_CONFIRM)
         huanzhi_roi = p.get("huanzhi_roi", self._DEFAULT_HUANZHI_ROI)
+        huanzhi_limit = int(p.get("huanzhi_limit", self._HUANZHI_LIMIT))
         close = p.get("close_target", self._DEFAULT_CLOSE)
         speed = float(p.get("stroke_speed_px_s", 100))
         inter_ms = int(p.get("inter_stroke_ms", 200))
@@ -361,7 +416,9 @@ class TuyinTuMo(CustomAction):
                     seg_px = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
                     # ceil：10~20px 的短段（RDP 拐点相邻/随机合并的跨笔连接线）也给 ≥2 步，
                     # 否则 int(19/10)=1 步 → 单步 19px 跳变（旧代码固有，随机合并放大了概率）
-                    n_steps = max(1, -(-seg_px // max_step_px))
+                    # int() 必须：float floor 除返回 float，max(1, 2.0)=2.0 → range(float) 抛
+                    # TypeError 被 MaaFw ctypes 吞掉 = 涂墨只按 down 不 move/up（08-30 全军 120min 锁）
+                    n_steps = max(1, int(-(-seg_px // max_step_px)))
                     for k in range(1, n_steps + 1):
                         t = k / n_steps
                         # ---- noise ①：插值点 ±1px 微抖（步长 ≤10px 约束下安全）----
@@ -407,10 +464,11 @@ class TuyinTuMo(CustomAction):
                 continue
             if percent is not None and percent < done_th:
                 # 未达标且轮次已尽 → 不点「完成」（0% 提交=浪费挑战次数）；
-                # 兜底：优先「换纸」直接返回，换纸不在才点关闭 + fallback
+                # 兜底：优先「换纸」直接返回（每账号限 huanzhi_limit 次），额度尽才点关闭 + fallback
                 self._bailout(
                     context, ctrl, huanzhi_roi, close, fallback,
                     reason=f"{max_rounds} 轮涂完仍只有 {percent}%（阈值 {done_th}%）", n=n,
+                    huanzhi_limit=huanzhi_limit,
                 )
                 return CustomAction.RunResult(success=False)
             # 达标（或完成度读不到 = 弹窗可能已过）→ 点「完成」提交
@@ -429,6 +487,7 @@ class TuyinTuMo(CustomAction):
         self._bailout(
             context, ctrl, huanzhi_roi, close, fallback,
             reason=f"{max_rounds} 轮后仍未达标", n=n,
+            huanzhi_limit=huanzhi_limit,
         )
         return CustomAction.RunResult(success=False)
 
