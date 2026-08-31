@@ -246,6 +246,14 @@ def _walk_strokes(
     visited）——乂 的两条对角线各自穿过交叉点互不阻断；普通格独占。
 
     :param turn_cos: 允许的最大转角 cos（0.0=可直角转，再狠就分笔）
+
+    ⚠ 步数硬顶（2026-08-31 事故修复）：交叉格（junc）永不标 visited、永远可选，
+    当骨架存在"环上格子全是交叉格"的闭环（花墨/小封闭字形下 8-连通对角捷径使
+    环的中点格变 deg3）时，走笔绕环一圈后非交叉格全被封死、交叉格永远 free、
+    90° 转角 cos=0.0 不触发收笔 → **无限绕环**（随机花墨 20 seeds 触发 45%，
+    08-31 team2 solo 队长 tuoyinjiance 即此，回调永不返回把 run_task 的
+    post_stop().wait() 也楔死，进程挂 84min 被 cancel）。走笔最长合法路径 =
+    每格恰走一次（visited 封死非交叉格），超过 len(pts)*2 步必是绕环，硬顶收笔。
     """
     pts = set(zip(*np.nonzero(sk)))
     if not pts:
@@ -255,6 +263,9 @@ def _walk_strokes(
     junc = {p for p, d in deg.items() if d >= 3}
     ends = [p for p, d in deg.items() if d == 1]
     starts = sorted(ends, key=lambda p: (p[0], p[1])) or sorted(pts)[:1]
+    # 步数硬顶：单次走笔最多走过的格数（*2 因 start 双向延伸各占一份；再宽裕
+    # 一倍容纳交叉格 pass-through 复用）。保险丝不是精确值——够小就能拦住绕环。
+    step_cap = len(pts) * 4
 
     visited: set[tuple[int, int]] = set()
 
@@ -267,13 +278,13 @@ def _walk_strokes(
         return q not in visited or q in junc
 
     def extend(start: tuple[int, int], first: tuple[int, int]) -> list[tuple[int, int]]:
-        """从 start→first 单向走笔到尽头。"""
+        """从 start→first 单向走笔到尽头（step_cap 步硬顶，防交叉环无限绕）。"""
         path = [start, first]
         if start not in junc:
             visited.add(start)
         if first not in junc:
             visited.add(first)
-        while True:
+        while len(path) < step_cap:
             cur = path[-1]
             d = norm((cur[0] - path[-2][0], cur[1] - path[-2][1]))
             cands = [q for q in nbr[cur] if free(q)]
@@ -335,8 +346,12 @@ def _walk_strokes(
         if st:
             strokes.append(st)
 
-    # 剩余未访问骨架（走笔被 turn 限制截断处）：从任意未访问格继续走
-    while True:
+    # 剩余未访问骨架（走笔被 turn 限制截断处）：从任意未访问格继续走。
+    # 迭代硬顶：每次循环至少应让 rest 缩一格（walk 的路径标 visited；否则
+    # visited.add(rest[0]) 兜底），但交叉格永不消耗 + walk 产出全交叉路径时
+    # rest 可能不缩 —— 上限 = 格数 * 常数，超了把剩余格全标 visited 退出
+    #（漏画的极端花墨骨架宁可少一笔，不能像 08-31 那样无限循环）。
+    for _ in range(len(pts) * 4 + 8):
         rest = [p for p in pts if p not in visited and p not in junc]
         if not rest:
             # 只剩交叉格 → 全部走完
@@ -349,6 +364,8 @@ def _walk_strokes(
             strokes.append(st)
         else:
             visited.add(rest[0])
+    else:
+        visited.update(p for p in pts if p not in visited)
 
     return [s for s in strokes if len(s) >= 2]
 
