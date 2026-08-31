@@ -299,6 +299,8 @@ powershell.exe -NoProfile -Command "\$live=(Get-CimInstance Win32_Process).Proce
 
 ## 4. 诊断命令速查（复制改日期即可）
 
+> **一键收集（推荐先跑这个）**：本目录 `5r_collect.py <YYYYMMDD> [--fast|--no-scp]` 一次完成：job 列表 + 拉编排日志归档 + 报告一矩阵（X/*/⚠ 标记）+ 报告二账号Δ + 报告三门0/1/2/3/4 数据 + on_error/timeout 分布与 ROUTINE 过滤归档 + maafw bak 覆盖表 + team 副本/捉鬼 + solo（运镖3镖/秘境结局/挖图/科举开门）真干核实，末尾 `[9]` 节列出必须人工完成的部分（门4逐题校验、读截图、异常 trace、写 report.md）。用它替代下面 §4 的手工命令；§4 保留作为单步命令参考（脚本失败/需单独复查时用）。
+
 ```bash
 PY="C:/Users/zhiyuan/AppData/Local/Programs/Python/Python313/python.exe"
 cd "C:/dev/Maa_MHXY_MG"
