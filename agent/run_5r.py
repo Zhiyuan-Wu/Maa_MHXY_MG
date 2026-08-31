@@ -50,6 +50,7 @@
   Win/Mac 同一份代码：REPO_DIR 由 ``__file__`` 推导（``MAA_5R_REPO`` 可覆盖）。
 """
 import builtins
+import enum
 import faulthandler
 import gc
 import json
@@ -72,7 +73,7 @@ from maa.toolkit import Toolkit
 from maa.resource import Resource
 from maa.controller import AdbController
 from maa.tasker import Tasker, TaskerEventSink
-from maa.pipeline import JRecognitionType, JTemplateMatch
+from maa.pipeline import JRecognitionType, JTemplateMatch, JOCR
 
 _IS_WINDOWS = sys.platform == "win32"
 
@@ -665,6 +666,11 @@ def _game_process_alive(adb, address, package=PACKAGE, timeout=8):
 
     ``adb -s <addr> shell pidof <package>``：返回 0 且 stdout 非空（有 PID）即存在；
     pidof 无匹配返回 1、adb 通信失败也非 0——一律按"不存在"处理（交给上层重试）。
+
+    ⚠ 判据盲区（环 3，08-29 job 20260829_190259 实证）：pidof 匹配**同包名任意进程**——
+    游戏主进程崩后系统拉起的广播进程 ``com.netease.my:XyqNotification`` 也算"活"，
+    探活假阳性、自愈层全瞎。**判活请用 :func:`_game_activity_alive`**（本函数保留给
+    ``_restart_instance`` 的 monkey 后复查等"只关心进程在不在"的场景）。
     """
     try:
         cp = subprocess.run([adb, "-s", address, "shell", "pidof", package],
@@ -673,6 +679,47 @@ def _game_process_alive(adb, address, package=PACKAGE, timeout=8):
     except Exception:
         return False
     return cp.returncode == 0 and bool(cp.stdout.strip())
+
+
+def _game_activity_alive(adb, address, package=PACKAGE, timeout=8):
+    """游戏是否**真正活着**：主进程在 且 主 Activity 在前台（V9，三态）。
+
+    替代裸 pidof 判活——堵环 3 判据假阳性：主进程崩后系统拉起同包名广播进程
+    ``XyqNotification``（pidof 有 PID）但主 Activity 已死、画面落安卓桌面。
+
+    返回三态（与 :func:`_game_focused` 同语义，**None 不计 miss**——否则 Tailscale 一抖
+    连续 2 次 False 会误杀健康号，停任务 + 白跑一遍重爬）：
+      True  = 活（pidof 有 PID 且前台 focus 是 MessiahNativeActivity）；
+      False = 确死（pidof 正常返回无 PID，或 focus 明确非主 Activity——含桌面/登录器
+              ProtocolLauncher/系统弹窗；注意包名级判据会把 ProtocolLauncher 也当活，
+              故必须到 **Activity 级**：MessiahNativeActivity 是游戏主 Activity）；
+      None  = 查询自身失败（adb 通信异常/超时）——不可置信，交给上层重试/告警，不判死。
+
+    实现：pidof 一次 + ``dumpsys window`` 抓 mCurrentFocus 一次（两命令各自整体超时）。
+    focus 判据复用 :func:`_game_focused` 已实战验证的写法（08-02 6130 ANR 案例）。
+    单次开销 ~1.5s（本地实测 5 台各 <1s）。
+    """
+    # 快路径：进程都没有 → 确死。区分两种 rc!=0：
+    #   adb 通信失败（"device not found"/offline/超时）→ None 不可置信（网络抖动会误杀）；
+    #   其余非 0（shell 内部错等，罕见）同样按不可置信处理。
+    #   pidof 无匹配在多数 Android 上 rc=1 且 stdout 空——与 "device not found" 的 rc=1 不可分，
+    #   故用 stderr 判别：adb 层错误必有 stderr（device not found / offline），真 pidof miss 无。
+    try:
+        cp = subprocess.run([adb, "-s", address, "shell", "pidof", package],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=timeout)
+    except Exception:
+        return None                       # pidof 通信失败：不可置信
+    if cp.returncode != 0 and cp.stderr.strip():
+        return None                       # adb 层错误（设备未连/offline）：不可置信
+    if cp.returncode != 0 and not cp.stdout.strip():
+        return False                      # rc!=0 但无 adb 错误、无 PID：pidof miss = 确死
+    if not cp.stdout.strip():
+        return False                      # rc==0 干净返回、无 PID：确死
+    f = _game_focused(adb, address, timeout=timeout)
+    if f is None:
+        return None                       # focus 查询失败：不可置信
+    return f                              # focus 明确 True/False
 
 
 def _start_game_process(adb, address, package=PACKAGE, timeout=15):
@@ -782,41 +829,57 @@ def _idx_to_addr(idx):
 
 
 def ensure_process(addresses, package=PACKAGE, retries=2, cool_down=10, come_up=40, cancel=None):
-    """在每个地址上确保游戏进程已启动（**交付界面：游戏进程存活**，建立在 ensure_instances 之上）。
+    """在每个地址上确保游戏进程已启动**且主 Activity 在前台**（V9 判据，建立在 ensure_instances 之上）。
 
-    每个地址：不在则 ``monkey`` 拉起 → 双重检查（检查①轮询到 pidof 命中 ≤``come_up`` →
-    冷却 ``cool_down`` → 检查② pidof）。任一未过即重新 monkey，``retries`` 轮仍不过则 raise。
+    每个地址：不在则 ``monkey`` 拉起 → 双重检查（检查①轮询到活性命中 ≤``come_up`` →
+    冷却 ``cool_down`` → 检查② 复查）。任一未过即重新 monkey，``retries`` 轮仍不过则 raise。
+
+    判据 = :func:`_game_activity_alive`（三态）：pidof 有 PID **且** 前台 focus 是
+    MessiahNativeActivity。**None（查询失败）不判死**——double_check 里的 _wait_for 对
+    None 按"未命中"继续轮询（等网络回稳），但**不计入"确死"**；只有明确 False（pidof
+    干净返回无 PID / focus 明确非主 Activity）才走 monkey。这堵住环 3 的广播进程假阳性
+    （XyqNotification 让 pidof 有 PID 但 focus 已是 launcher），也避免 Tailscale 抖动
+    把健康号误判死。
 
     背景：实测 ``control launch -pkg`` 在本环境**不能可靠起游戏**（120s 未起），monkey 才是可靠
-    手段（~2s）。闪退隐含在 double-check 失败 → 重新 monkey。
+    手段（~2s）。闪退/起在后台隐含在 double-check 失败 → 重新 monkey（monkey 起的就是主
+    Activity，起后用 V9 判据复查——顺带自愈"起在后台"）。
 
     ``cancel``：mumu_server HTTP handler 客户端断连时传入，命中即提前 return（与 ensure_instances 同语义）。
     """
     adb = _adb_path()
     _adb_reset(adb, addresses)
-    print(f">>> 逐台双重检查游戏进程（cool_down={cool_down}s, come_up={come_up}s）")
+    print(f">>> 逐台双重检查游戏活性（pidof+主Activity 前台；cool_down={cool_down}s, come_up={come_up}s）")
     failed = []
     for addr in addresses:
         if _cancelled(cancel):
             print(">>> ensure_process：HTTP 客户端已断连，中止")
             return
         t0 = time.time()
+
+        def _alive(a=addr):
+            v = _game_activity_alive(adb, a, package)
+            if v is None:
+                print(f"    [{a}] 活性查询失败（adb 异常），按未命中继续轮询（不判死）")
+                return False
+            return v
         for attempt in range(retries + 1):
-            if not _game_process_alive(adb, addr, package):
-                print(f"    [{addr}] 游戏进程不存在，monkey 拉起")
+            v = _game_activity_alive(adb, addr, package)
+            if v is False:
+                print(f"    [{addr}] 游戏未活（无进程或主 Activity 不在前台），monkey 拉起")
                 _start_game_process(adb, addr, package)
-            if _double_check(lambda a=addr: _game_process_alive(adb, a, package), cool_down, come_up, cancel=cancel):
-                print(f"    [{addr}] 游戏进程就绪（双重检查通过，用时 {int(time.time() - t0)}s）")
+            if _double_check(_alive, cool_down, come_up, cancel=cancel):
+                print(f"    [{addr}] 游戏活性就绪（双重检查通过，用时 {int(time.time() - t0)}s）")
                 break
             if attempt < retries:
                 if _cancelled(cancel):
                     return
-                print(f"    [{addr}] 游戏进程双重检查未过，重新 monkey（{attempt + 1}/{retries}）")
+                print(f"    [{addr}] 游戏活性双重检查未过，重新 monkey（{attempt + 1}/{retries}）")
         else:
             failed.append(addr)
     if failed:
-        raise RuntimeError(f"游戏进程在 {failed} 上重试 {retries} 轮仍未就绪")
-    print(f"<<< 游戏进程就绪：{list(addresses)}")
+        raise RuntimeError(f"游戏活性在 {failed} 上重试 {retries} 轮仍未就绪")
+    print(f"<<< 游戏活性就绪：{list(addresses)}")
 
 
 class _RoleTagSink(TaskerEventSink):
@@ -852,6 +915,71 @@ class _RoleTagSink(TaskerEventSink):
         self._tagged = True
         print(f"[tag] {self._role}({self._addr}) uuid={detail.uuid}"
               f"   # maafw 按 Tx/uuid 归号用")
+
+
+def _wait_job(job, timeout, label):
+    """有界等一个 MaaFw Job：job 本体在后台线程 wait()，主线程轮询 deadline。
+
+    Job.wait() 无原生超时（controller 对半死 adb 会话可无限阻塞——2026-08-31 晚风
+    CONNECTED heal 实证挂 22 分钟）。到点返回 False（判失败，交给上层 heal/重启漏斗），
+    后台线程留着自生自灭（进程退出 TerminateProcess 收口）。job 已完成则返回其 status。"""
+    done_box = []
+
+    def _w():
+        try:
+            job.wait()
+        except Exception:
+            pass
+        done_box.append(True)
+
+    threading.Thread(target=_w, daemon=True).start()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if done_box:
+            return True
+        time.sleep(0.2)
+    print(f"    !!! {label} 超过 {timeout}s 未完成（疑 controller/adb 楔死），判失败")
+    return False
+
+
+def _build_tasker(role, addr, found):
+    """给一台设备建 tasker（独立 Resource 三元组 + [tag] 打标）——connect_all 体内抽出，
+    供 RoleBoot 的 heal_connected 复用（v2 V3）。``found`` 为 ``{address: DeviceInfo}``
+    （调用方已做好 remote 补 connect 的兜底）。失败返 None（不 raise——状态机按台阶处理）。
+
+    ⚠ Job.wait() 无原生超时：post_connection / post_bundle 各自在后台线程跑 + 主线程
+    _wait_deadline 轮询（120s/300s）——2026-08-31 实证晚风 CONNECTED heal 挂死 22 分钟
+    （post_connection 对半死 adb 会话可无限阻塞），4/5 就绪的台只能干等 f.result(2400)。
+    超时即判失败返回 None（挂起的后台线程留给它自己——进程退出 TerminateProcess 收口，
+    与 launch_parallel 对 controller 楔死的策略一致）；boot_all 的 f.result(硬顶) 仍是
+    最后防线（P0-1 双层：内层 120/300s 让 heal 快速失败重试，外层 2400s 兜全线程挂死）。
+    """
+    dev = found.get(addr)
+    if dev is None:
+        print(f"    [{role}] {addr} 不在 adb 设备列表（heal_connected 未过按失败计）")
+        return None
+    ctrl = AdbController(
+        adb_path=str(dev.adb_path), address=dev.address,
+        screencap_methods=dev.screencap_methods, input_methods=dev.input_methods,
+        config=dev.config,
+    )
+    cj = ctrl.post_connection()
+    if not _wait_job(cj, 120, f"[{role}] post_connection"):
+        return None
+    resource = Resource()                   # 每账号独立 Resource（独立 OCR 模型，避免并发 abort）
+    rj = resource.post_bundle(RESOURCE_PATH)
+    if not _wait_job(rj, 300, f"[{role}] post_bundle"):
+        return None
+    _register_customs(resource)             # 各自注册 custom（OCRNum/count/returnOCR/…）
+    t = Tasker()
+    t.bind(resource, ctrl)
+    if not t.inited:
+        print(f"    [{role}] Tasker 未就绪（{addr}）")
+        return None
+    # 角色↔uuid 显式打标：首个 Task.Starting 事件落一行 [tag]，之后原生日志按 uuid 精确归号
+    # （sink 对象由 t._sink_holder 保活，本地无需另行持引用）。
+    t.add_sink(_RoleTagSink(role, addr))
+    return t
 
 
 def connect_all(roles, package=PACKAGE):
@@ -896,23 +1024,9 @@ def connect_all(roles, package=PACKAGE):
                 found = {d.address: d for d in _adb_find_devices()}
             if addr not in found:
                 raise RuntimeError(f"{role} 的设备 {addr} 未找到；已发现 {list(found)}")
-        dev = found[addr]
-        ctrl = AdbController(
-            adb_path=str(dev.adb_path), address=dev.address,
-            screencap_methods=dev.screencap_methods, input_methods=dev.input_methods,
-            config=dev.config,
-        )
-        ctrl.post_connection().wait()
-        resource = Resource()                   # 每账号独立 Resource（独立 OCR 模型，避免并发 abort）
-        resource.post_bundle(RESOURCE_PATH).wait()
-        _register_customs(resource)             # 各自注册 custom（OCRNum/count/returnOCR/…）
-        t = Tasker()
-        t.bind(resource, ctrl)
-        if not t.inited:
-            raise RuntimeError(f"{role} Tasker 未就绪（{addr}）")
-        # 角色↔uuid 显式打标：首个 Task.Starting 事件落一行 [tag]，之后原生日志按 uuid 精确归号
-        # （sink 对象由 t._sink_holder 保活，本地无需另行持引用）。
-        t.add_sink(_RoleTagSink(role, addr))
+        t = _build_tasker(role, addr, found)
+        if t is None:
+            raise RuntimeError(f"{role} 的 Tasker 构建失败（{addr}）")
         taskers[role] = t
         print(f"[{idx}] {role} 已连接 {addr}（独立 Resource）")  # [id] 用于 solo --ids
     return taskers
@@ -966,15 +1080,18 @@ def run_task(tasker, entry, override=None, timeout=600, label=None, watch_alive=
     超时收口时顺带抓一张当前画面存盘（``_save_timeout_screenshot``）——墙钟超时被 stop 强停
     不触发 pipeline 的 on_error 截图，补一张便于事后定位"卡在哪一帧"。
 
-    ``watch_alive``：可选 ``() -> bool`` 游戏存活探针。任务运行中若探针**连续**
-    ``watch_dead_streak`` 秒返回 False（如游戏被 force-stop 杀死 / 崩溃不再重启），**提前**
-    ``post_stop`` 止损返回 False——避免 start 这类长任务对着死游戏空等满墙钟超时（600s），把恢复
-    快速交给上层 L1/L3。start/panduan 场景传 ``lambda: _game_process_alive(adb, address, package)``。
+    ``watch_alive``：可选 ``() -> bool|None`` 游戏存活探针（V9 后传三态
+    ``_game_activity_alive``）。任务运行中若探针**连续**返回 False（明确判死，如游戏被
+    force-stop 杀死 / 主 Activity 塌到桌面），**提前** ``post_stop`` 止损返回 False——避免
+    start 这类长任务对着死游戏空等满墙钟超时（600s），把恢复快速交给上层 L1/L3。
+    start/panduan 场景传 ``lambda: _game_activity_alive(adb, address, package)``。
 
-    ``watch_dead_streak`` 默认 3：要求**连续** 3 次探针 False 才判"游戏已死"。必须——pidof 瞬时为空
-    （进程崩溃后自动重启的空窗）或 adb 抖动（恢复阶段 adb 操作密集）都会让单次 False 误报，过早
-    掐断本可自己恢复的 start。连续 3s 才置信，仍能抓住真正被 force-stop 杀死的情况（~43s→~46s）。
-
+    ``watch_dead_streak`` 默认 3：要求**连续** 3 次探针 False 才判"游戏已死"。必须——V9
+    判据下 False 含"focus 瞬时非主 Activity"（游戏内弹原生分享/权限框），且 pidof 瞬时为空
+    （进程崩溃后自动重启的空窗）都会让单次 False 误报，过早掐断本可自己恢复的 start。
+    连续 3s 才置信，仍能抓住真正被 force-stop 杀死的情况。**None（adb 抖动/查询失败）
+    不计 miss 也不清零**——网络恢复后按连续计数继续（探针全 None ≥ timeout 时靠墙钟超时兜底，
+    不会无限挂：[[screencap-death-sentinel-blind]] 的教训是"无帧按通过"，这里是"无据不判"）。
     ``sentinel``：可选 ``() -> bool`` 完成确认回调。``job.done`` 后调一次，返回 False 即判"假完成"
     （走 on_error→空节点）→ run_task 返回 False，不让空节点伪装成成功。默认 None=不校验（维持
     旧行为）。solo_all 传 ``_sentinel_main``（主界面模板识别）以抓"任务 done 但角色停在挖宝/战斗/
@@ -1001,15 +1118,16 @@ def run_task(tasker, entry, override=None, timeout=600, label=None, watch_alive=
             print(f"<<< {label} 完成（用时 {int(time.time() - _t0)}s）")
             return True
         if watch_alive is not None:
-            if not watch_alive():
+            v = watch_alive()
+            if v is False:
                 dead_streak += 1
                 if dead_streak >= watch_dead_streak:
                     tasker.post_stop().wait()
                     _save_timeout_screenshot(tasker, label)
-                    print(f"!!! {label} 游戏进程持续死亡 {watch_dead_streak}s，提前 stop（用时 {int(time.time() - _t0)}s）")
+                    print(f"!!! {label} 游戏持续判死 {watch_dead_streak}s（主进程/主Activity 塌），提前 stop（用时 {int(time.time() - _t0)}s）")
                     return False
-            else:
-                dead_streak = 0
+            elif v is True:
+                dead_streak = 0     # None（查询失败）：不计 miss 也不清零
         time.sleep(1)
     tasker.post_stop().wait()
     _save_timeout_screenshot(tasker, label)  # stop 后补一张超时截图（兜底循环不触发 on_error 的场景必备）
@@ -1072,11 +1190,23 @@ def _screencap(tasker):
 
 
 def _recognize(tasker, reco_type, reco_param, img):
-    """对**给定帧**跑一次性识别，返回是否命中（job.succeeded）。识别异常 → False。"""
+    """对**给定帧**跑一次性识别，返回是否**真实命中**（node.hit）。识别异常 → False。
+
+    ⚠ 2026-08-31 实证（决定性）：``job.succeeded`` **不是命中**——它是任务状态成功（识别跑完
+    即 True，无命中也 True）。用"不可能命中的模板/OCR"实测 ``_recognize`` 恒 True：所有
+    post_recognition 哨兵（_ready_main 快路径、_sentinel_main、登录反门）全瞎——主界面模板
+    快路径恒过（还说得通），反门恒触发（LOGGED_IN 永不就绪，08-31 09:06 五号 633 次假命中
+    循环即此），_sentinel_main 恒过（08-29 拦下的 2 例实为 _screencap 抛错返 None 的路径）。
+    真命中判据 = TaskDetail.node_id_list → NodeDetail.recognition.hit。"""
     try:
         job = tasker.post_recognition(reco_type, reco_param, img)
         job.wait()
-        return bool(job.succeeded)
+        d = job.get()
+        for node_id in (d.node_id_list or []):
+            nd = tasker.get_node_detail(node_id)
+            if nd is not None and nd.recognition is not None and nd.recognition.hit:
+                return True
+        return False
     except Exception as e:
         print(f"    （哨兵识别异常，按未命中：{e}）")
         return False
@@ -1126,15 +1256,30 @@ def _game_focused(adb, address, timeout=8):
 #   ① 帧差：隔 live_gap 秒再截一帧，必须与上一帧**不同**（主界面有环境动画→必变；
 #      冻结 / ANR 静态弹窗 / 陈旧缓存帧 → 完全相同）。
 #   ② focus：前台必须是游戏主活动 MessiahNativeActivity（独立于 Maa 截图）。
-def _ready_main(tasker, adb, address, live_gap=2.5):
-    """权威就绪：主界面模板命中 + 画面在变（非冻结/陈旧）+ 游戏主活动在前台。
+# 登录界面反门（B 形态）：主界面模板（_MAIN_RECO 右侧竖条）在登录界面照样命中——
+# 2026-08-30 v2 状态机 probe-first 下 5 台全停登录界面而 LOGGED_IN 假阳性、start 从未跑。
+# 双判据（任一命中即在登录界面）：OCR（与 start.json 点击登录游戏 同 ROI/expected）+
+# 模板（zonghe/denglu_youxi.png = 登录按钮截图，2026-08-31 实拍裁剪）。OCR 单用在
+# MaaFw 的 expected 宽松匹配下有场景文字误读风险，模板单用有分辨率/皮肤变化风险，双保险。
+_LOGIN_BTN_RECO = JOCR(expected=["登录游戏"], roi=[504, 490, 268, 76])
+_LOGIN_BTN_TMPL = JTemplateMatch(template=["zonghe/denglu_youxi.png"],
+                                 roi=[504, 490, 268, 76], threshold=[0.8])
 
-    只在模板命中后才做（昂贵的）帧差 + focus 确认——模板 miss 直接 False（快路径），不白等 live_gap。"""
+
+def _ready_main(tasker, adb, address, live_gap=2.5):
+    """权威就绪：主界面模板命中 + **不在登录界面** + 画面在变（非冻结/陈旧）+ 游戏主活动在前台。
+
+    只在模板命中后才做（昂贵的）反门/帧差/focus 确认——模板 miss 直接 False（快路径），不白等 live_gap。"""
     img = _screencap(tasker)
     if img is None:
         return False
     if not _recognize(tasker, JRecognitionType.TemplateMatch, _MAIN_RECO, img):
         return False   # 模板 miss：快路径
+    # 反门：登录按钮在场（OCR 或模板任一命中）= 登录界面（主界面模板假命中）→ 未就绪
+    if (_recognize(tasker, JRecognitionType.OCR, _LOGIN_BTN_RECO, img)
+            or _recognize(tasker, JRecognitionType.TemplateMatch, _LOGIN_BTN_TMPL, img)):
+        print(f"    [{address}] 主界面模板命中但登录按钮在场（登录界面假命中）→ 未就绪")
+        return False
     # 模板命中 → 活性①：再截一帧，必须不同
     time.sleep(live_gap)
     img2 = _screencap(tasker)
@@ -1179,6 +1324,18 @@ def _restart_instance(adb, address, idx, package, boot_come_up=180):
 
 # ---------------- 能力 1：启动一个账号 ----------------
 
+def _run_login_pipelines(tasker, adb, address, package=PACKAGE, timeout=240):
+    """start + panduan 两个 run_task（launch() 体内抽出，供 RoleBoot heal_logged_in 复用，v2 V3）。
+    watch_alive = V9 三态探针（None 不计 dead streak）。返回 start 的 run_task 结果（panduan
+    是清场、best-effort，不作为成败判据——成败由上层 _ready_main 权威判定）。"""
+    _watch = (lambda: _game_activity_alive(adb, address, package))
+    ok = run_task(tasker, "start", override={"启动游戏": {"package": package}},
+                  timeout=timeout, label="start 启动/登录", watch_alive=_watch)
+    run_task(tasker, "panduan_zhujiemian", timeout=120, label="panduan_zhujiemian 清场到主界面",
+             watch_alive=_watch)
+    return ok
+
+
 def launch(tasker, package=PACKAGE, timeout=240, address=None):
     """任意状态→主界面，**返回权威就绪判定**（经主界面哨兵确认，不信 start/panduan 的 done-status）。
 
@@ -1193,14 +1350,14 @@ def launch(tasker, package=PACKAGE, timeout=240, address=None):
     ``address`` 由 ``launch_parallel`` 从 ``ROLES`` 注入（adb force-stop / 哨兵地址用）；为 None
     时（zhuagui 单账号旧路径）退化为只 start、不哨兵，沿用旧行为。
     """
-    adb = _adb_for_mode()   # local=MuMu adb.exe（Win）；remote=Mac adb（经 ADB_SERVER_SOCKET 打 Win 设备）
-    _watch = (lambda: _game_process_alive(adb, address, package)) if address is not None else None
-    run_task(tasker, "start", override={"启动游戏": {"package": package}},
-             timeout=timeout, label="start 启动/登录", watch_alive=_watch)
-    run_task(tasker, "panduan_zhujiemian", timeout=120, label="panduan_zhujiemian 清场到主界面",
-             watch_alive=_watch)
     if address is None:
-        return True   # 退化路径（无 address 不哨兵）：仅 zhuagui 单账号，保留旧行为
+        # 退化路径（无 address 不哨兵）：仅 zhuagui 单账号，保留旧行为
+        run_task(tasker, "start", override={"启动游戏": {"package": package}},
+                 timeout=timeout, label="start 启动/登录")
+        run_task(tasker, "panduan_zhujiemian", timeout=120, label="panduan_zhujiemian 清场到主界面")
+        return True
+    adb = _adb_for_mode()   # local=MuMu adb.exe（Win）；remote=Mac adb（经 ADB_SERVER_SOCKET 打 Win 设备）
+    _run_login_pipelines(tasker, adb, address, package, timeout)
     # 权威判定：start 跑完后必须在**活着的主界面**（模板 + 帧差 + focus）。不是 → 返 False，
     # 由上层 _launch_account 升级 L3（实例级重启 + 重连 tasker + 重试）。无 L1——L3 严格优于它。
     if _wait_for(lambda: _ready_main(tasker, adb, address), 60, 3):
@@ -1227,7 +1384,7 @@ def _reconnect_tasker(address):
     ``_launch_account`` 在 L3 前显式 post_stop（见该函数）。
     """
     Toolkit.init_option(DEBUG_DIR)
-    found = {d.address: d for d in (_adb_find_devices())}
+    found = {d.address: d for d in (_adb_find_devices(max_age=0))}   # 重连场景须新鲜列表
     if address not in found:
         print(f"    [{address}] 重连失败：实例未在 adb 设备列表")
         return None
@@ -1754,11 +1911,34 @@ def _adb_for_mode():
     return _mac_adb() if _BACKEND == "remote" else _adb_path()
 
 
-def _adb_find_devices():
-    """按模式发现 adb 设备：remote 用 Mac adb（specified_adb）连远端 Win server；local 用默认。"""
-    if _BACKEND == "remote":
-        return list(Toolkit.find_adb_devices(specified_adb=_mac_adb()))
-    return list(Toolkit.find_adb_devices())
+_ADB_FIND_LOCK = threading.Lock()      # Toolkit.find_adb_devices 非线程安全（2026-08-31 实证：
+_ADB_FIND_CACHE = (None, 0.0)          # 5 boot 线程并发调它 → access violation reading 0x41xxxxxx，
+                                       # 与 Resource 共享竞态同族的 MaaFw 原生层问题；旧链路主线程
+                                       # 串行调用从未暴露）。加全局锁 + 3s 结果缓存（设备列表几秒
+                                       # 内不变，5 线程 heal_connected 共享一份快照，省 5 次全量扫描）。
+_MAAFW_CONNECT_LOCK = threading.Lock() # 更深一层（同日第二轮实证）：find 与 Tasker.bind 并发也崩——
+                                       # 缓存命中跳过 find 锁的线程直接 bind，与持锁扫描线程并发进
+                                       # native → access violation @ tasker.py bind。故 heal_connected
+                                       # 的"find + _build_tasker（含 bind）"整体串行：connect 阶段
+                                       # 本就 ~15s/台，串行化不伤吞吐，换 native 绝对互斥。
+
+
+def _adb_find_devices(max_age=3.0):
+    """按模式发现 adb 设备：remote 用 Mac adb（specified_adb）连远端 Win server；local 用默认。
+
+    线程安全：持全局锁调用（防 MaaFw native 并发崩），结果缓存 ``max_age`` 秒（boot 五线程
+    并发 heal_connected 时共享快照；重启实例后需新列表的调用方传 ``max_age=0`` 强制刷新）。"""
+    global _ADB_FIND_CACHE
+    with _ADB_FIND_LOCK:
+        snap, ts = _ADB_FIND_CACHE
+        if snap is not None and time.time() - ts < max_age:
+            return list(snap)
+        if _BACKEND == "remote":
+            snap = list(Toolkit.find_adb_devices(specified_adb=_mac_adb()))
+        else:
+            snap = list(Toolkit.find_adb_devices())
+        _ADB_FIND_CACHE = (snap, time.time())
+        return list(snap)
 
 
 def _ip_is_local(ip):
@@ -1863,6 +2043,328 @@ def be_adb_connect(address):
         RemoteBackend.post("/adb/connect", {"address": address}, timeout=20)
 
 
+def be_launch_one(idx, package=PACKAGE):
+    """轻拉一台实例（RoleBoot heal_booted 用，v2 V2）。remote 走短端点 /instance/launch。"""
+    if _BACKEND == "remote":
+        RemoteBackend.post("/instance/launch", {"idx": int(idx), "package": package}, timeout=150)
+        return
+    _launch_one(idx, package)
+
+
+def be_instance_started(idx):
+    """实例进程是否已起（RoleBoot 判断"要不要 heal_booted"用，避免对已跑实例瞎 launch）。
+    remote 走 GET /mumu/info。"""
+    if _BACKEND == "remote":
+        try:
+            info = RemoteBackend.get(f"/mumu/info?indices={int(idx)}", timeout=15)
+            return bool(info.get(str(int(idx)), {}).get("is_process_started"))
+        except Exception:
+            return False
+    try:
+        return bool(mumu_info(str(int(idx))).get(str(int(idx)), {}).get("is_process_started"))
+    except Exception:
+        return False
+
+
+# ============================================================================
+# v2：统一 per-instance 状态机 RoleBoot + boot_all（plan.md 第二部分）。
+# 替代 main 里 ensure_instances→ensure_process→connect_all→launch_parallel 四段批处理：
+#   一台设备 = 一个 RoleBoot；四级判据 = 同一台设备的四个就绪台阶；每级失败的恢复动作
+#   收敛到 {重连 adb、monkey、轻拉实例、重启实例}，由 boot_role 统一漏斗驱动。
+# 关键不变量（评审 P0，实施时必须保持）：
+#   P0-1 硬顶：boot_all 用 f.result(timeout=单台硬顶) 兜 Job.wait() 无超时面（controller
+#       楔死时 post_stop().wait()/post_connection().wait() 可无限挂）——预算不是机制，硬顶才是。
+#   P0-2 重启⇒tasker 失效：实例重启后旧 tasker 的 inited 仍 True（bind 一次终身 True），
+#       CONNECTED 探针会假阳性——重启分支必须显式作废 rb.tasker 并 post_stop 旧 tasker。
+#   P0-4 冷启动预处理：boot_all 前置 pre-pass（local=adb reset 清 offline 缓存；remote=逐
+#       addr 补 connect）+ heal_booted 全局信号量错峰——防 5 线程齐发压满宿主（LAUNCH_STAGGER 语义）。
+# ============================================================================
+
+BOOT_STAGE_BUDGET = {           # 各台阶单次轮询预算秒（plan §5.1；GAME_ALIVE 90 = v1 come_up 40→90）
+    "GAME_ALIVE": 90,           #   （monkey 起游戏 + 双检冷却的本体时间 ~12s，90 容冷启动慢机）
+    "CONNECTED": 60,            #   （_build_tasker 本体 ~5-10s，60 容 resource 加载慢）
+    "LOGGED_IN": 300,           #   （start pipeline ~150s + 哨兵 60s，300 容登录排队）
+}
+BOOT_HEAL_MAX = 2               # 每台阶轻恢复次数上限，用尽才升级实例重启
+BOOT_INSTANCE_DEADLINE = 2400   # 单台从 OFF 到 LOGGED_IN 的墙钟硬顶（> Σ预算+重启 470s+余量）
+BOOT_LAUNCH_SEMAPHORE = None    # 惰性建：错峰信号量（保证相邻实例 launch 间隔 ≥ LAUNCH_STAGGER）
+
+
+class InstanceFailure(RuntimeError):
+    """boot_all 后仍未就绪的实例名单异常（main 据此严格/宽松分叉，v1/v2 共有语义 V6）。"""
+
+    def __init__(self, msg, failed):
+        super().__init__(msg)
+        self.failed = list(failed)
+
+
+# 宽松模式：这些 mode 下 boot_all 有缺员时剔除缺员继续（而非整跑中止）。其余（full/team/form/
+# checkin/zhuagui）严格——缺员必 raise（组队/拓印缺人做不完整，宁可整跑报错）。
+_MEMBER_OPTIONAL = {"launch", "solo", "zhuagui"}
+
+
+class BootStage(enum.IntEnum):
+    OFF = 0
+    BOOTED = 1        # ① adb_ready：connect + boot_completed==1
+    GAME_ALIVE = 2    # ② 主进程在 + 主 Activity 前台（V9 三态判据）
+    CONNECTED = 3     # ③ tasker 三元组就绪（独立 Resource）
+    LOGGED_IN = 4     # ④ _ready_main：主界面模板 + 帧差 + focus 三重哨兵
+
+
+class RoleBoot:
+    """一台设备从 OFF 到 LOGGED_IN 的状态机（v2 V1）。probe/heal 全部组合现有件：
+    probe_booted=_adb_ready / probe_game=_game_activity_alive / probe_connected=tasker.inited
+    / probe_logged_in=_ready_main；heal_booted=be_launch_one / heal_game=adb重连+monkey
+    / heal_connected=_build_tasker / heal_logged_in=_run_login_pipelines。
+    实例重启（heal 用尽后的引擎级兜底）不属于台阶，在 boot_role 里统一做。
+    """
+
+    def __init__(self, role, address, package=PACKAGE, cancel=None):
+        self.role = role
+        self.addr = address
+        self.idx = (int(address.rsplit(":", 1)[1]) - 16384) // 32   # MuMu 约定 adb_port=16384+32*idx
+        self.package = package
+        self.cancel = cancel
+        self.stage = BootStage.OFF
+        self.tasker = None            # CONNECTED 起持有；重启后作废（P0-2）
+        self.restarts_used = 0        # 实例重启额度：全程（开机+运行中重爬）每台 1 次
+        self.degraded = False         # watchdog 用（V10 预留）：True=运行中塌陷过
+        self.adb = _adb_for_mode()    # local=MuMu adb.exe；remote=Mac adb（经 ADB_SERVER_SOCKET 打 Win）
+
+    # ---- 探针（只读；None=查询失败不置信，状态机按"未过"轮询但不计入 heal 失败依据）----
+
+    def probe_booted(self):
+        try:
+            return bool(_adb_ready(self.adb, self.addr))
+        except Exception:
+            return False
+
+    def probe_game(self):
+        try:
+            return _game_activity_alive(self.adb, self.addr, self.package) is True
+        except Exception:
+            return False
+
+    def probe_connected(self):
+        return self.tasker is not None and bool(self.tasker.inited)
+
+    def probe_logged_in(self):
+        try:
+            return bool(_ready_main(self.tasker, self.adb, self.addr))
+        except Exception:
+            return False
+
+    # ---- 台阶三元组表（一处可查，替代 4 个签名散参数）----
+
+    def stage_spec(self, stage):
+        """(probe, act_or_heal, budget, 名称, act_first)——act_or_heal=None 表示无轻恢复。
+        ``act_first``（act 型台阶）：**先执行 act（无条件跑登录）再 probe 验证**——用于
+        LOGGED_IN。为什么 probe-first 在这里是错的：start 的职责不只是"验证已登录"，
+        更是**执行登录**（点登录游戏、过协议、选角）——游戏起在登录界面时 _MAIN_RECO
+        模板照样命中（右侧竖条低特异性），probe-first 会把"没登录"误判为"已登录"而永不
+        触发 act（2026-08-30 实证：5 台全停登录界面、LOGGED_IN 全假阳性）。act-first 对齐
+        旧 launch() 语义：无条件跑 start+panduan，已登录号走资源层的秒退出口
+        （start.json 启动游戏.next 首候选=主界面），代价可忽略。"""
+        if stage == BootStage.BOOTED:
+            return self.probe_booted, self.heal_booted, 180, "BOOTED(adb就绪)", False
+        if stage == BootStage.GAME_ALIVE:
+            return self.probe_game, self.heal_game, BOOT_STAGE_BUDGET["GAME_ALIVE"], "GAME_ALIVE(游戏前台)", False
+        if stage == BootStage.CONNECTED:
+            return self.probe_connected, self.heal_connected, BOOT_STAGE_BUDGET["CONNECTED"], "CONNECTED(tasker)", False
+        if stage == BootStage.LOGGED_IN:
+            return self.probe_logged_in, self.heal_logged_in, BOOT_STAGE_BUDGET["LOGGED_IN"], "LOGGED_IN(主界面)", True
+        raise ValueError(stage)
+
+    # ---- 轻恢复 ----
+
+    def heal_booted(self):
+        global BOOT_LAUNCH_SEMAPHORE
+        if BOOT_LAUNCH_SEMAPHORE is None:
+            BOOT_LAUNCH_SEMAPHORE = threading.Semaphore(1)
+        # 错峰（P0-4）：持锁期间连 launch 带 LAUNCH_STAGGER 冷却，保证相邻两台实例拉起间隔
+        # ≥LAUNCH_STAGGER——5 线程齐发压满宿主 CPU/磁盘 + MuMuManager 批量崩溃面，正是
+        # ensure_instances/launch_parallel 既有错峰语义要防的。
+        with BOOT_LAUNCH_SEMAPHORE:
+            if not be_instance_started(self.idx):
+                print(f"    [boot:{self.role}] 实例未起，轻拉 MuMuManager launch idx{self.idx}")
+                be_launch_one(self.idx, self.package)
+            time.sleep(LAUNCH_STAGGER)
+            return True
+
+    def heal_game(self):
+        print(f"    [boot:{self.role}] 重连 adb + monkey 拉游戏")
+        _adb_connect(self.adb, self.addr)          # 幂等；adb 会话半死时刷新注册
+        _start_game_process(self.adb, self.addr, self.package)
+        return True
+
+    def heal_connected(self):
+        # 整段持 _MAAFW_CONNECT_LOCK 串行（find+build+bind 互斥其它线程的任何 MaaFw native
+        # 扫描/绑定——见 _MAAFW_CONNECT_LOCK 注释）；单台 connect ~15s，5 台串行 ~75s 可接受。
+        with _MAAFW_CONNECT_LOCK:
+            # max_age=0：实例重启/adb 重连后必须拿新鲜列表（stale 缓存会让 _build_tasker 拿旧 DeviceInfo）
+            found = {d.address: d for d in _adb_find_devices(max_age=0)}
+            if self.addr not in found and _BACKEND == "remote":
+                be_adb_connect(self.addr)
+                found = {d.address: d for d in _adb_find_devices(max_age=0)}
+            t = _build_tasker(self.role, self.addr, found)
+            if t is not None:
+                self.tasker = t                    # 旧的丢引用由 GC 回收（不复用 Resource，防并发 abort）
+            return t is not None
+
+    def heal_logged_in(self):
+        if self.tasker is None:
+            return False
+        return _run_login_pipelines(self.tasker, self.adb, self.addr, self.package,
+                                    timeout=TIMEOUTS["start"])
+
+    # ---- 引擎级兜底：实例重启（唯一能覆盖所有故障面的原语；跨开机+运行中共用 1 次额度）----
+
+    def restart_instance(self):
+        """L3 实例级重启。必须先作废 tasker（P0-2）：旧 tasker 的 inited 在实例重启后仍 True，
+        CONNECTED 探针会假阳性——拿着死 controller 爬 LOGGED_IN 就是 start 空烧 heal。"""
+        print(f"!!! [boot:{self.role}] 引擎级兜底：实例重启 idx{self.idx}（第 {self.restarts_used + 1} 次）")
+        try:
+            if self.tasker is not None:
+                self.tasker.post_stop()            # 不 wait（失效 native handle 上会挂），仅发停止信号
+        except Exception:
+            pass
+        self.tasker = None                         # P0-2：显式作废，重爬时 heal_connected 重建
+        ok = be_restart_instance(self.adb, self.addr, self.idx, self.package)
+        self.restarts_used += 1
+        if ok:
+            self.stage = BootStage.BOOTED          # 重启后从 GAME_ALIVE 起重爬（adb 已由 _restart_instance 等）
+        return bool(ok)
+
+    # ---- 就绪度复查（运行中重爬入口，V10 预留；也供 boot_all 快路径用）----
+
+    def ensure(self, target=BootStage.LOGGED_IN):
+        """从当前 stage 爬到 target（复用 boot_role 漏斗，含 heal/重启）。"""
+        return boot_role(self, target)
+
+
+def boot_role(rb, target=BootStage.LOGGED_IN):
+    """统一恢复漏斗（v2 V1）：对 rb 从当前 stage+1 爬到 target。
+
+    每台阶：轮询 probe ≤budget → 过则冷却复查上台（双检抓闪退，复查内容=probe 本身，
+    GAME_ALIVE 的复查含前台 Activity）；不过 → heal（≤BOOT_HEAL_MAX 次）→ 再轮询；
+    heal 用尽 → 未用过重启则 restart_instance（额度全程 1 次）回 BOOTED 从 GAME_ALIVE 重爬；
+    已用过仍不过 → 该台使命结束，返回 False（不 raise——名单由 boot_all 汇总）。
+
+    **act 型台阶**（stage_spec 第 5 元 act_first，当前仅 LOGGED_IN）：先无条件执行 act
+    （=heal 函数，此处即跑 start 登录）再 probe 验证——probe-first 会把登录界面的
+    _MAIN_RECO 模板假命中当"已登录"，登录永不执行（2026-08-30 实证）。act 失败/probe
+    未过照常走 heal×BOOT_HEAL_MAX → 重启漏斗（此时再跑 start 就是重试）。
+
+    探针 None（查询失败）在 _wait_for 里按"未命中"继续轮询等回稳，不单独计数——探针
+    持续全 None 时该台阶最终耗尽 budget 走 heal，网络恢复后自然爬回（[[screencap-death-sentinel-blind]]
+    的教训是"无帧按通过"，这里语义相反：无据不判活）。
+    """
+    t0 = time.time()
+    trace = [BootStage(rb.stage).name]
+    while rb.stage < target:
+        stage = BootStage(rb.stage + 1)
+        probe, heal, budget, name, act_first = rb.stage_spec(stage)
+        if act_first:
+            try:
+                print(f"    [boot:{rb.role}] {name} act-first：无条件执行登录再验证")
+                heal()
+            except Exception as e:
+                print(f"    [boot:{rb.role}] act 异常（继续按未愈处理）：{e}")
+            passed = _double_check(probe, cool_down=10, come_up=budget, cancel=rb.cancel)
+        else:
+            passed = _double_check(probe, cool_down=10, come_up=budget, cancel=rb.cancel)
+        if not passed:
+            for attempt in range(1, BOOT_HEAL_MAX + 1):
+                if _cancelled(rb.cancel):
+                    print(f">>> [boot:{rb.role}] 已取消，中止爬梯")
+                    return False
+                print(f"    [boot:{rb.role}] {name} probe 未过，heal {attempt}/{BOOT_HEAL_MAX}")
+                try:
+                    heal()
+                except Exception as e:
+                    print(f"    [boot:{rb.role}] heal 异常（继续按未愈处理）：{e}")
+                if _double_check(probe, cool_down=10, come_up=budget, cancel=rb.cancel):
+                    passed = True
+                    break
+        if not passed:
+            if rb.restarts_used < 1:
+                if not rb.restart_instance():
+                    print(f"!!! [boot:{rb.role}] 实例重启失败，该台使命结束")
+                    return False
+                trace.append("RESTART")
+                continue          # 回 BOOTED，从 GAME_ALIVE 重爬（不再给新 heal 额度外的轮次）
+            print(f"!!! [boot:{rb.role}] {name} heal×{BOOT_HEAL_MAX}+重启 均未过，该台使命结束")
+            return False
+        rb.stage = stage
+        trace.append(stage.name)
+        print(f"[boot] {rb.role} ↑ {name}（用时 {int(time.time() - t0)}s）")
+    print(f"[boot] {rb.role} {'→'.join(trace)} 达成 {target.name}（总用时 {int(time.time() - t0)}s）")
+    return True
+
+
+def boot_all(roles, target=BootStage.LOGGED_IN, package=PACKAGE, stagger=LAUNCH_STAGGER):
+    """并行驱动全部 RoleBoot（v2 V1）。返回 ``(booted: {role: RoleBoot}, failed: [role]...)``。
+
+    - 并行 + 错峰：每台一个线程；heal_booted 内部信号量保证相邻实例 launch 间隔 ≥stagger（P0-4）。
+    - 硬顶（P0-1）：单台 f.result(timeout=BOOT_INSTANCE_DEADLINE)——兜 Job.wait() 无超时面
+      （controller 楔死时 start 的 post_stop().wait() / _build_tasker 的 post_connection().wait()
+      可无限挂）。超时线程判失败但**不 join**——由进程退出 TerminateProcess 收口（与
+      launch_parallel 同策略）；已就绪的台照常返回。
+    - 冷启动预处理（P0-4）：local=kill-server 清 offline 缓存（6130@16448 实证）；remote=逐
+      addr 请求 mumu_server /adb/connect 注册进 5038。防 CONNECTED heal 被 stale offline 骗空转。
+    """
+    global BOOT_LAUNCH_SEMAPHORE
+    BOOT_LAUNCH_SEMAPHORE = threading.Semaphore(1)
+    print(f">>> boot_all：{len(roles)} 台并行爬梯到 {target.name}（单台硬顶 {BOOT_INSTANCE_DEADLINE}s，"
+          f"实例 launch 错峰 ≥{stagger}s）")
+    # 冷启动预处理（P0-4）
+    if _BACKEND == "remote":
+        for addr in roles.values():
+            be_adb_connect(addr)
+    else:
+        adb = _adb_path()
+        try:
+            subprocess.run([adb, "kill-server"], capture_output=True, timeout=15)
+            print(f">>> adb kill-server（{adb}）清陈旧 offline 缓存（boot_all 预处理）")
+        except Exception as e:
+            print(f"!! adb kill-server 失败（忽略继续）：{e}")
+        time.sleep(0.5)
+        for addr in roles.values():
+            _adb_connect(adb, addr)
+
+    rbs = {role: RoleBoot(role, addr, package) for role, addr in roles.items()}
+    booted, failed = {}, []
+
+    def _run(rb):
+        try:
+            return rb.ensure(target)
+        except Exception as e:
+            print(f"!!! [boot:{rb.role}] 爬梯异常：{e}")
+            traceback.print_exc()
+            return False
+
+    with ThreadPoolExecutor(max_workers=len(rbs)) as ex:
+        futs = {ex.submit(_run, rb): rb.role for rb in rbs.values()}
+        # 错峰：submit 齐发，但 heal_booted 内部信号量保证实例 launch 间隔 ≥stagger；登录
+        # 阶段（LOGGED_IN heal=start pipeline）天然被实例错峰带开——第 k 台要等第 k-1 台
+        # launch 完（含 stagger 冷却）才轮到自己的实例动作，start 的齐发峰已被削平。
+        for f, role in futs.items():
+            try:
+                ok = f.result(timeout=max(BOOT_INSTANCE_DEADLINE, 1))
+            except TimeoutError:
+                print(f"!!! [{role}] boot 超过 {BOOT_INSTANCE_DEADLINE}s 未返回（疑 controller 楔死），判失败")
+                ok = False
+            except Exception as e:
+                print(f"!!! [{role}] boot 异常：{e}")
+                ok = False
+            if ok:
+                booted[role] = rbs[role]
+            else:
+                failed.append(role)
+    print(f"<<< boot_all 完成：就绪 {list(booted)}；未就绪 {failed or '无'}")
+    return booted, failed
+
+
 def main(mode="full", solo_tasks=None, solo_ids=None):
     open_log()  # 先开日志：后续所有 print 自动加 [时间戳] 前缀并 tee 到 DEBUG_DIR/run_5r/
     if _CONFIG_NAME:
@@ -1883,26 +2385,27 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
     timeouts = TIMEOUTS
     member_names = [r for r in roles if r != "队长"]
 
-    # 生命周期：确保 ROLES 里的实例都启动到 start_finished（幂等；未启动的用
-    # ``control launch -pkg`` 拉起并自动开游戏）
+    # ---- v2 状态机开机链（V4）：五段批处理 → boot_all 一段 ----
+    # 一台设备一个 RoleBoot，统一漏斗爬梯 OFF→BOOTED→GAME_ALIVE→CONNECTED→LOGGED_IN；
+    # 含 heal/实例重启/错峰/硬顶/冷启动预处理（见 RoleBoot 段头注释）。就绪的台 probe 秒过
+    # （~3-5s/台），solo 模式不再有"launch 挂了没人点登录"的空窗（环 2 堵法）。
+    boot_roles = roles if mode != "zhuagui" else {"队长": roles["队长"]}   # zhuagui 只 boot 队长
+    print(f"=== boot_all：{list(boot_roles)} → LOGGED_IN（v2 状态机）===")
+    booted, boot_failed = boot_all(boot_roles, package=package)
+    if boot_failed:
+        if mode in _MEMBER_OPTIONAL:
+            # 宽松模式（launch/solo/zhuagui）：剔除缺员继续——solo 少一人跑少一人的任务
+            print(f"!!! 以下账号 boot 未就绪，宽松模式剔除缺员继续：{boot_failed}")
+        else:
+            # 严格模式（full/team/form/checkin）：组队/拓印缺人做不完整，宁可整跑报错
+            raise InstanceFailure(
+                f"以下账号 boot 未就绪（{len(booted)}/{len(boot_roles)} 台就绪）：{boot_failed}", boot_failed)
     role_idx = be_role_indices(roles)
-    print("=== 启动/检查 MuMu 实例 ===")
-    be_ensure_instances(sorted(role_idx.values()), package=package)
+    taskers = {role: rb.tasker for role, rb in booted.items()}
+    role_boots = booted   # 保留引用：V10 watchdog/运行中重爬用（当前未接线，预留）
 
-    # 在交给 Maa 的 start 之前，由 Python 侧显式确认游戏进程稳态存活（双重检查 + 重试）。
-    # ensure_instances 的 -pkg 虽顺带拉游戏，但不保证进程稳定；这里 adb 兜底，缺一台即中止整轮。
-    print("=== 确认游戏进程存活（双重检查 + 重试）===")
-    be_ensure_process(list(roles.values()), package=package)
-
-    print("=== 连接 5 设备（共享 Resource）===")
-    taskers = connect_all(roles, package=package)
-
-    if mode in ("full", "launch", "team", "form", "checkin"):
-        # 并行启动、每个相隔 LAUNCH_STAGGER 秒（错峰）。设 0 即齐发。各账号独立 Resource，
-        # 已无 OCR 并发竞态；错峰仅为平滑宿主负载（避免 5 个 StartApp/游戏同时拉起压满 CPU/磁盘）。
-        # wall-clock 从 N×单账号降到 stagger×(N-1) + 单账号。
-        print(f"=== 启动 {len(taskers)} 个账号（并行，每个间隔 {LAUNCH_STAGGER}s）===")
-        launch_parallel(taskers, package=package, timeout=timeouts["start"], stagger=LAUNCH_STAGGER)
+    if mode == "launch":
+        print(f"=== launch 模式完成：{len(taskers)} 台就绪 ===")
 
     if mode in ("full", "checkin"):
         # 拓印检测（秘境降妖拓印考验）：全员并行各跑两遍 tuoyinjiance。弹窗非必现、涂墨
@@ -1915,11 +2418,8 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
                  per_timeout=timeouts.get("tuoyinjiance", timeouts["solo"]))
 
     if mode == "zhuagui":
-        # 队长单人无限捉鬼：只需队长登录到主界面（关闭人员检测 → 不要求队伍满员），
-        # 只 launch 队长一人，不起其余账号。
-        print("=== 启动队长（登录到主界面）===")
-        launch(taskers["队长"], package=package, timeout=timeouts["start"],
-               address=ROLES["队长"])
+        # 队长单人无限捉鬼：只需队长登录到主界面（关闭人员检测 → 不要求队伍满员）。
+        # boot_all 已只 boot 队长并登录到 LOGGED_IN，这里直接开跑。
         print("=== 队长无限捉鬼（关闭人员检测-不进入轮次选择）===")
         zhuagui(taskers)
 
@@ -1958,6 +2458,7 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
             # 先释放全部 MaaFw 对象（让 controller 在设备仍存活时清理 /data/local/tmp 临时文件），
             # 再关实例。否则实例已关、controller 析构时 adb shell rm 打死设备 → 一串 [ERR] 噪音。
             taskers.clear()
+            role_boots.clear()   # RoleBoot.tasker 引用同步释放（防 hold 住已 clear 的 tasker）
             gc.collect()
             print("=== 收尾：关闭 MuMu 实例 ===")
             be_shutdown_instances(to_stop)
@@ -2160,7 +2661,9 @@ class _MuMuHandler(BaseHTTPRequestHandler):
                 addr = query.get("address", [None])[0]
                 if not addr:
                     _send_err(self, 400, "missing address"); return
-                _send_json(self, {"alive": _game_process_alive(_adb_path(), addr)})
+                # V9：三态探活（True/False/None）。裸 pidof 会被同包名广播进程
+                # XyqNotification 骗过（环 3）；None=查询失败，客户端自行重试。
+                _send_json(self, {"alive": _game_activity_alive(_adb_path(), addr)})
             elif path in ("", "/", "/help"):
                 _send_json(self, {"endpoints": [
                     "GET /health", "GET /mumu/info?indices=all", "GET /process/alive?address=",
