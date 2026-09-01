@@ -2373,6 +2373,10 @@ def boot_all(roles, target=BootStage.LOGGED_IN, package=PACKAGE, stagger=LAUNCH_
 
 def main(mode="full", solo_tasks=None, solo_ids=None):
     open_log()  # 先开日志：后续所有 print 自动加 [时间戳] 前缀并 tee 到 DEBUG_DIR/run_5r/
+    # v2 boot 链不再走 connect_all，而 init_option 原本只挂在 connect_all/_reconnect_tasker
+    # 里——漏掉后 MaaFw 原生日志/on_error/timeout 截图全不开（2026-09-01 实证：全天 6 job
+    # maafw.log 0 行、on_error 0 张，排查无原生层可查）。幂等，放 main 最前兜住所有路径。
+    Toolkit.init_option(DEBUG_DIR)
     if _CONFIG_NAME:
         print(f"=== 当前配置覆盖：--config {_CONFIG_NAME}（本配置文件 > run_5r 默认）===")
     _assert_repo()
