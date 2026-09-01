@@ -2214,8 +2214,14 @@ class RoleBoot:
     def heal_logged_in(self):
         if self.tasker is None:
             return False
-        return _run_login_pipelines(self.tasker, self.adb, self.addr, self.package,
-                                    timeout=TIMEOUTS["start"])
+        # 错峰（2026-09-01 补）：温启动（实例已起、游戏前台）时 5 台 act-first 会在 ~11s 内
+        # 齐发 5 个 StartApp+登录，压满宿主 CPU/磁盘/ADB——正是 LAUNCH_STAGGER 要防的形态
+        # （冷启动下 BOOTED 错峰间接带开了 act，掩盖了此缺口；solo 温启动暴露）。act 持
+        # BOOT_LAUNCH_SEMAPHORE（与拉实例共用一把——两者本就该全局互斥错峰），start 本体
+        # ~70s ≫ stagger 20s，持锁即天然错开；start 完成后不额外 sleep（start 本身耗时够了）。
+        with BOOT_LAUNCH_SEMAPHORE:
+            return _run_login_pipelines(self.tasker, self.adb, self.addr, self.package,
+                                        timeout=TIMEOUTS["start"])
 
     # ---- 引擎级兜底：实例重启（唯一能覆盖所有故障面的原语；跨开机+运行中共用 1 次额度）----
 
