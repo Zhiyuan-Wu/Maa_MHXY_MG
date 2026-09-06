@@ -2085,8 +2085,14 @@ BOOT_STAGE_BUDGET = {           # 各台阶单次轮询预算秒（plan §5.1；
     "CONNECTED": 60,            #   （_build_tasker 本体 ~5-10s，60 容 resource 加载慢）
     "LOGGED_IN": 300,           #   （start pipeline ~150s + 哨兵 60s，300 容登录排队）
 }
-BOOT_HEAL_MAX = 2               # 每台阶轻恢复次数上限，用尽才升级实例重启
-BOOT_INSTANCE_DEADLINE = 2400   # 单台从 OFF 到 LOGGED_IN 的墙钟硬顶（> Σ预算+重启 470s+余量）
+# 每台阶轻恢复次数上限，用尽才升级实例重启。LOGGED_IN=0（2026-09-06 定）：heal_logged_in 是
+# "同一 tasker + 同一游戏进程现状"原地重跑 start——对 ANR 僵尸态（黑屏+系统弹窗、StartApp 假
+# success、识别全 miss）注定无效，只会空烧 600s×2+120s×2 ≈ 24min 才轮到 L3（09-06 14:30 job
+# 欧阳实证：14:40 卡死→15:00 L3，L3 本身一次救回）。act-first 已无条件跑过一次 start，失败
+# 即环境坏了，直接 L3 拿干净实例。其余台阶 heal 是真恢复动作（拉实例/monkey/重建 tasker），保留 2。
+BOOT_HEAL_MAX = {"BOOTED": 2, "GAME_ALIVE": 2, "CONNECTED": 2, "LOGGED_IN": 0}
+BOOT_RESTART_MAX = 2            # 实例重启额度：全程每台 2 次（原 1；LOGGED_IN heal 归零后由重启兜底）
+BOOT_INSTANCE_DEADLINE = 2400   # 单台从 OFF 到 LOGGED_IN 的墙钟硬顶（> Σ预算+重启 470s×2+余量）
 BOOT_LAUNCH_SEMAPHORE = None    # 惰性建：错峰信号量（保证相邻实例 launch 间隔 ≥ LAUNCH_STAGGER）
 
 
@@ -2127,7 +2133,7 @@ class RoleBoot:
         self.cancel = cancel
         self.stage = BootStage.OFF
         self.tasker = None            # CONNECTED 起持有；重启后作废（P0-2）
-        self.restarts_used = 0        # 实例重启额度：全程（开机+运行中重爬）每台 1 次
+        self.restarts_used = 0        # 实例重启额度：全程（开机+运行中重爬）每台 BOOT_RESTART_MAX 次
         self.degraded = False         # watchdog 用（V10 预留）：True=运行中塌陷过
         self.adb = _adb_for_mode()    # local=MuMu adb.exe；remote=Mac adb（经 ADB_SERVER_SOCKET 打 Win）
 
@@ -2157,7 +2163,7 @@ class RoleBoot:
     # ---- 台阶三元组表（一处可查，替代 4 个签名散参数）----
 
     def stage_spec(self, stage):
-        """(probe, act_or_heal, budget, 名称, act_first)——act_or_heal=None 表示无轻恢复。
+        """(probe, act_or_heal, budget, 名称, act_first, heal_max)——act_or_heal=None 表示无轻恢复。
         ``act_first``（act 型台阶）：**先执行 act（无条件跑登录）再 probe 验证**——用于
         LOGGED_IN。为什么 probe-first 在这里是错的：start 的职责不只是"验证已登录"，
         更是**执行登录**（点登录游戏、过协议、选角）——游戏起在登录界面时 _MAIN_RECO
@@ -2166,13 +2172,16 @@ class RoleBoot:
         旧 launch() 语义：无条件跑 start+panduan，已登录号走资源层的秒退出口
         （start.json 启动游戏.next 首候选=主界面），代价可忽略。"""
         if stage == BootStage.BOOTED:
-            return self.probe_booted, self.heal_booted, 180, "BOOTED(adb就绪)", False
+            return self.probe_booted, self.heal_booted, 180, "BOOTED(adb就绪)", False, BOOT_HEAL_MAX["BOOTED"]
         if stage == BootStage.GAME_ALIVE:
-            return self.probe_game, self.heal_game, BOOT_STAGE_BUDGET["GAME_ALIVE"], "GAME_ALIVE(游戏前台)", False
+            return (self.probe_game, self.heal_game, BOOT_STAGE_BUDGET["GAME_ALIVE"],
+                    "GAME_ALIVE(游戏前台)", False, BOOT_HEAL_MAX["GAME_ALIVE"])
         if stage == BootStage.CONNECTED:
-            return self.probe_connected, self.heal_connected, BOOT_STAGE_BUDGET["CONNECTED"], "CONNECTED(tasker)", False
+            return (self.probe_connected, self.heal_connected, BOOT_STAGE_BUDGET["CONNECTED"],
+                    "CONNECTED(tasker)", False, BOOT_HEAL_MAX["CONNECTED"])
         if stage == BootStage.LOGGED_IN:
-            return self.probe_logged_in, self.heal_logged_in, BOOT_STAGE_BUDGET["LOGGED_IN"], "LOGGED_IN(主界面)", True
+            return (self.probe_logged_in, self.heal_logged_in, BOOT_STAGE_BUDGET["LOGGED_IN"],
+                    "LOGGED_IN(主界面)", True, BOOT_HEAL_MAX["LOGGED_IN"])
         raise ValueError(stage)
 
     # ---- 轻恢复 ----
@@ -2223,7 +2232,7 @@ class RoleBoot:
             return _run_login_pipelines(self.tasker, self.adb, self.addr, self.package,
                                         timeout=TIMEOUTS["start"])
 
-    # ---- 引擎级兜底：实例重启（唯一能覆盖所有故障面的原语；跨开机+运行中共用 1 次额度）----
+    # ---- 引擎级兜底：实例重启（唯一能覆盖所有故障面的原语；跨开机+运行中共用 BOOT_RESTART_MAX 次额度）----
 
     def restart_instance(self):
         """L3 实例级重启。必须先作废 tasker（P0-2）：旧 tasker 的 inited 在实例重启后仍 True，
@@ -2252,14 +2261,15 @@ def boot_role(rb, target=BootStage.LOGGED_IN):
     """统一恢复漏斗（v2 V1）：对 rb 从当前 stage+1 爬到 target。
 
     每台阶：轮询 probe ≤budget → 过则冷却复查上台（双检抓闪退，复查内容=probe 本身，
-    GAME_ALIVE 的复查含前台 Activity）；不过 → heal（≤BOOT_HEAL_MAX 次）→ 再轮询；
-    heal 用尽 → 未用过重启则 restart_instance（额度全程 1 次）回 BOOTED 从 GAME_ALIVE 重爬；
-    已用过仍不过 → 该台使命结束，返回 False（不 raise——名单由 boot_all 汇总）。
+    GAME_ALIVE 的复查含前台 Activity）；不过 → heal（≤该台阶 heal_max，LOGGED_IN=0 直跳）
+    → 再轮询；heal 用尽 → 未用完重启额度则 restart_instance（全程 BOOT_RESTART_MAX 次）
+    回 BOOTED 从 GAME_ALIVE 重爬；额度用尽仍不过 → 该台使命结束，返回 False（不 raise
+    ——名单由 boot_all 汇总）。
 
     **act 型台阶**（stage_spec 第 5 元 act_first，当前仅 LOGGED_IN）：先无条件执行 act
     （=heal 函数，此处即跑 start 登录）再 probe 验证——probe-first 会把登录界面的
     _MAIN_RECO 模板假命中当"已登录"，登录永不执行（2026-08-30 实证）。act 失败/probe
-    未过照常走 heal×BOOT_HEAL_MAX → 重启漏斗（此时再跑 start 就是重试）。
+    未过照常走 heal×heal_max → 重启漏斗（LOGGED_IN heal_max=0，act 失败即 L3 拿干净实例）。
 
     探针 None（查询失败）在 _wait_for 里按"未命中"继续轮询等回稳，不单独计数——探针
     持续全 None 时该台阶最终耗尽 budget 走 heal，网络恢复后自然爬回（[[screencap-death-sentinel-blind]]
@@ -2269,7 +2279,7 @@ def boot_role(rb, target=BootStage.LOGGED_IN):
     trace = [BootStage(rb.stage).name]
     while rb.stage < target:
         stage = BootStage(rb.stage + 1)
-        probe, heal, budget, name, act_first = rb.stage_spec(stage)
+        probe, heal, budget, name, act_first, heal_max = rb.stage_spec(stage)
         if act_first:
             try:
                 print(f"    [boot:{rb.role}] {name} act-first：无条件执行登录再验证")
@@ -2279,12 +2289,12 @@ def boot_role(rb, target=BootStage.LOGGED_IN):
             passed = _double_check(probe, cool_down=10, come_up=budget, cancel=rb.cancel)
         else:
             passed = _double_check(probe, cool_down=10, come_up=budget, cancel=rb.cancel)
-        if not passed:
-            for attempt in range(1, BOOT_HEAL_MAX + 1):
+        if not passed and heal_max > 0:
+            for attempt in range(1, heal_max + 1):
                 if _cancelled(rb.cancel):
                     print(f">>> [boot:{rb.role}] 已取消，中止爬梯")
                     return False
-                print(f"    [boot:{rb.role}] {name} probe 未过，heal {attempt}/{BOOT_HEAL_MAX}")
+                print(f"    [boot:{rb.role}] {name} probe 未过，heal {attempt}/{heal_max}")
                 try:
                     heal()
                 except Exception as e:
@@ -2293,13 +2303,13 @@ def boot_role(rb, target=BootStage.LOGGED_IN):
                     passed = True
                     break
         if not passed:
-            if rb.restarts_used < 1:
+            if rb.restarts_used < BOOT_RESTART_MAX:
                 if not rb.restart_instance():
                     print(f"!!! [boot:{rb.role}] 实例重启失败，该台使命结束")
                     return False
                 trace.append("RESTART")
                 continue          # 回 BOOTED，从 GAME_ALIVE 重爬（不再给新 heal 额度外的轮次）
-            print(f"!!! [boot:{rb.role}] {name} heal×{BOOT_HEAL_MAX}+重启 均未过，该台使命结束")
+            print(f"!!! [boot:{rb.role}] {name} heal×{heal_max}+重启×{BOOT_RESTART_MAX} 均未过，该台使命结束")
             return False
         rb.stage = stage
         trace.append(stage.name)
