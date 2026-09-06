@@ -2095,6 +2095,17 @@ BOOT_RESTART_MAX = 2            # 实例重启额度：全程每台 2 次（原 
 BOOT_INSTANCE_DEADLINE = 2400   # 单台从 OFF 到 LOGGED_IN 的墙钟硬顶（> Σ预算+重启 470s×2+余量）
 BOOT_LAUNCH_SEMAPHORE = None    # 惰性建：错峰信号量（保证相邻实例 launch 间隔 ≥ LAUNCH_STAGGER）
 
+# 停尸房（2026-09-06）：退役 tasker 持有到进程退出，**永不触发 MaaTaskerDestroy**。
+# 为什么：restart_instance/heal_connected 丢掉旧 tasker 引用时，CPython refcount 同步跑
+# Tasker.__del__ → MaaTaskerDestroy——与 native 侧刚 post 出去的 stop 处理、controller 在途
+# 截图 I/O（remote adb 天然慢）并发操作同一批状态机锁 → pthread_mutex_lock EINVAL →
+# libc++abi uncaught system_error → SIGABRT(-6) 整进程死（09-06 22:51/22:59 两连崩实证，
+# 崩点栈 tasker.py __del__ ← run_5r restart_instance；同款 race 14:30 job 因 tasker 已静默
+# 而幸免）。Destroy 本身的收益只是提前回收 ~0.1GB OCR 模型 + controller 线程，而 L3 实例
+# 重启已释放该实例 3-4GB，泄漏面又被 台数×(heal次数+BOOT_RESTART_MAX) 封顶——得不偿失。
+# 最小复现器：agent/repro_tasker_destroy_race.py（--mode keep 即本修法的构造性验证）。
+_RETIRED_TASKERS = []
+
 
 class InstanceFailure(RuntimeError):
     """boot_all 后仍未就绪的实例名单异常（main 据此严格/宽松分叉，v1/v2 共有语义 V6）。"""
@@ -2217,7 +2228,10 @@ class RoleBoot:
                 found = {d.address: d for d in _adb_find_devices(max_age=0)}
             t = _build_tasker(self.role, self.addr, found)
             if t is not None:
-                self.tasker = t                    # 旧的丢引用由 GC 回收（不复用 Resource，防并发 abort）
+                if self.tasker is not None:
+                    _RETIRED_TASKERS.append(self.tasker)   # 同款 race 面：旧 tasker 入停尸房（见
+                    # _RETIRED_TASKERS 注释），不立即 destroy
+                self.tasker = t
             return t is not None
 
     def heal_logged_in(self):
@@ -2243,7 +2257,12 @@ class RoleBoot:
                 self.tasker.post_stop()            # 不 wait（失效 native handle 上会挂），仅发停止信号
         except Exception:
             pass
-        self.tasker = None                         # P0-2：显式作废，重爬时 heal_connected 重建
+        # 入停尸房而非置 None（2026-09-06）：置 None 会立即 refcount 归零 → __del__ →
+        # MaaTaskerDestroy 与 stop 处理线程竞争 → mutex EINVAL abort（见 _RETIRED_TASKERS
+        # 注释）。post_stop 已发，native 侧自会收尾；我们只作废 Python 引用、不销毁。
+        if self.tasker is not None:
+            _RETIRED_TASKERS.append(self.tasker)
+            self.tasker = None                     # P0-2：显式作废，重爬时 heal_connected 重建
         ok = be_restart_instance(self.adb, self.addr, self.idx, self.package)
         self.restarts_used += 1
         if ok:
