@@ -14,10 +14,13 @@ pipeline 无对应节点会 20s 超时 → 空节点假成功（08-24 job2 侠�
      或点完所有笔 → 点「完成」提交；未达标可整轮重涂（``max_rounds`` 次内）。
 """
 import json
+import math
 import os
 import random
 import threading
 import time
+
+import numpy as np
 
 from maa.agent.agent_server import AgentServer
 from maa.custom_action import CustomAction
@@ -36,10 +39,23 @@ _DEFAULT_TEMPLATE = os.path.join(
 
 
 # ---------------- 人手噪声（noise 系数 0 = 完全旧行为） ----------------
-# 目的：打掉"每次执行逐字节相同"的机器人指纹。四类噪声都只动**表现层**（触点坐标/
+# 目的：打掉"每次执行逐字节相同"的机器人指纹。噪声都只动**表现层**（触点坐标/
 # 时序/笔画分组/按钮点位），不动识别参数（color/tolerance/cell —— 动它们会伤识别稳定性）。
 # 约束（见 memory tuyin-touch-gesture-needs-small-steps）：相邻触点仍须 ≤10px 连续小步，
 # 故抖动幅度 ≤2px、且以"抖动后的顶点"做插值（插值点自身只 ±1px 微抖，不会破坏连续性）。
+#
+# v2 空间随机（_humanize_strokes，2026-09-06 加）：旧 noise 只改"画法"（连笔/方向/
+# 时序/±1~2px 逐点抖动），不改"画在哪"——识别链确定性，同一截图永远产出同一组
+# 骨架中心线，dev（触点到骨架平均距离）实测仅 0.1~0.2px，游戏跨次/跨账号比对同一
+# 图案的轨迹会看到近同一条线。_humanize_strokes 五项打散"画在哪"（脚本
+# debug/sample_tuyin_noise2.py 验证：dev 0.2→2.6px、off-ink（距墨>8px）保持 0%）：
+#   ① 走廊横移：每笔沿法向恒定偏置 ±6px 内（"手感歪"），整条线换位置而非逐点摩擦；
+#   ② 低频手颤：偏离=沿弧长的平滑正弦（波长 30~70px、幅 1~3px），相邻点位移连续
+#      → 步长约束天然满足，频谱接近人手（iid 白噪声的频谱本身就是机器指纹）；
+#   ③ 起收笔过冲：沿进/出方向延伸 3~9px（现状端点=RDP 顶点逐字节相同，第二强指纹）；
+#   ④ 单笔 30% 反向 + 笔序邻位交换（现状恒 (y,x) 排序恒方向）；
+#   ⑤ 全局微仿射：整体平移 ±4px + 绕墨迹质心 ±0.5° 旋转——跨次比对时"整幅坐姿不同"
+#      级错位（5 号跑同一图案时跨账号比对是现成风险），与①-④的"线自身变形"正交。
 
 
 def _jit(p: tuple[int, int], amp: float) -> tuple[int, int]:
@@ -50,6 +66,164 @@ def _jit(p: tuple[int, int], amp: float) -> tuple[int, int]:
         int(round(p[0] + random.uniform(-amp, amp))),
         int(round(p[1] + random.uniform(-amp, amp))),
     )
+
+
+def _unit(vx: float, vy: float) -> tuple[float, float]:
+    """二维向量归一化（零向量回 (0,0)）。"""
+    L = math.hypot(vx, vy)
+    if L == 0:
+        return 0.0, 0.0
+    return vx / L, vy / L
+
+
+def _resample_polyline(verts: list[tuple[float, float]], step: float = 6.0):
+    """折线沿弧长等距重采样，**每个顶点必采样**（yield (x, y, 切向dx, 切向dy)）。
+
+    顶点处光标对齐归零：否则顶点前最后采样点距顶点可任意 <step，跨顶点两采样
+    点基距最大 step*2=12px —— 本身就破 ≤10px 连续手势约束（a_xiashi1 stroke5
+    顶点 (675,351) 实测 13px）。对齐后跨顶点步长恒 ≤step。
+    顶点处的切向取**离开段**方向（与下一点的偏移法向一致，避免首点用反方向）。
+    step=6px：手颤波长 30~70px 的最短波长上有 ≥5 个采样点，不混叠。
+    """
+    # 段级展开：每段 [(起点, 终点)]，段内弧长重采样 + 段端（顶点）强制出点
+    for i, ((x1, y1), (x2, y2)) in enumerate(zip(verts, verts[1:])):
+        seg_len = math.hypot(x2 - x1, y2 - y1)
+        ux, uy = _unit(x2 - x1, y2 - y1)
+        t = 0.0
+        while t < seg_len - 1e-9:
+            yield (x1 + ux * t, y1 + uy * t, ux, uy)
+            t += step
+        # 段尾=顶点（或折线终点）：强制采样，切向=本段方向（对最后一点无所谓）
+        yield (x2, y2, ux, uy)
+
+
+def _humanize_strokes(
+    abs_strokes: list[list[tuple[int, int]]],
+    clean_roi_offset: tuple[int, int],
+    clean_mask: "np.ndarray",
+    noise: float,
+) -> tuple[list[list[tuple[int, int]]], list[str]]:
+    """v2 空间随机：走廊横移+低频手颤+起收笔过冲+方向/笔序随机+全局微仿射。
+
+    输入绝对坐标笔画（RDP 顶点），输出同构的"人化"顶点序列（后续分组/插值/
+    逐点微抖逻辑不变）。noise<=0 原样返回（一键回退）。
+
+    :param clean_roi_offset: 降噪墨迹 mask 在整图里的 (x, y) 偏移（= roi 前两项）
+    :param clean_mask:       tuyin_analyze 的 clean mask（ROI 相对坐标），仅用于
+                             取墨迹质心当⑤的旋转中心（旋转表现为"字整体摆正/歪
+                             一点"而非绕角落大幅位移）
+    :param noise:            0.0~1.0 全局系数，整体缩放各随机幅度
+    :return:                 (新笔画列表, 人类化说明) 供日志
+    """
+    if noise <= 0 or not abs_strokes:
+        return abs_strokes, []
+    # 尝试级"手感"参数：同一次执行内各笔共享（一个人的手感），跨执行重抽
+    off_scale = random.uniform(0.5, 1.5)     # ① 横移缩放（→ 实际 |偏置| ≤6px）
+    tremor_a = random.uniform(1.0, 3.0)      # ② 手颤幅 px
+    tremor_wl = random.uniform(30.0, 70.0)   # ② 手颤波长 px
+    over_p = random.uniform(0.4, 0.9)        # ③ 每端过冲概率
+    rev_p = random.uniform(0.2, 0.4)         # ④ 单笔反向概率
+    # ⑤ 全局微仿射：平移 ±4px + 绕墨迹质心 ±0.5°（最远端点位移 ~6px，
+    #    墨面半宽 ~7px + 刷半径 15px，off-ink 实测 0%）
+    aff_dx = random.uniform(-4, 4) * noise
+    aff_dy = random.uniform(-4, 4) * noise
+    aff_rot = math.radians(random.uniform(-0.5, 0.5)) * noise
+    ys, xs = np.nonzero(clean_mask)
+    if len(xs):
+        cx = float(xs.mean()) + clean_roi_offset[0]
+        cy = float(ys.mean()) + clean_roi_offset[1]
+    else:  # mask 空（理论到不了这——strokes 非空则 clean 非空）；兜底用首笔首点
+        cx, cy = float(abs_strokes[0][0][0]), float(abs_strokes[0][0][1])
+    cos_r, sin_r = math.cos(aff_rot), math.sin(aff_rot)
+
+    def _affine(p: tuple[float, float]) -> tuple[float, float]:
+        x, y = p[0] + aff_dx, p[1] + aff_dy
+        return (cx + (x - cx) * cos_r - (y - cy) * sin_r,
+                cy + (x - cx) * sin_r + (y - cy) * cos_r)
+
+    # ④ 笔序邻位交换（书写顺序扰动；恒 (y,x) 排序本身是指纹）
+    order = list(range(len(abs_strokes)))
+    for i in range(len(order) - 1):
+        if random.random() < 0.45:
+            order[i], order[i + 1] = order[i + 1], order[i]
+
+    out: list[list[tuple[int, int]]] = []
+    rev_n = 0
+    for idx in order:
+        verts = [(float(p[0]), float(p[1])) for p in abs_strokes[idx]]
+        if len(verts) < 2:
+            # 孤立点：仅仿射+抖动，保持"单点笔"语义（分组阶段处理 <2 点）
+            ax, ay = _affine(verts[0])
+            out.append([(int(round(ax)), int(round(ay)))])
+            continue
+        if random.random() < rev_p:          # ④ 单笔反向（挑顺手方向）
+            verts.reverse()
+            rev_n += 1
+        # ③ 起收笔过冲：沿进入/离开方向再延伸（人手起笔常冲过笔画端一点）
+        ext0 = random.uniform(3, 9) * noise if random.random() < over_p else 0.0
+        ext1 = random.uniform(3, 9) * noise if random.random() < over_p else 0.0
+        ux0, uy0 = _unit(verts[0][0] - verts[1][0], verts[0][1] - verts[1][1])
+        ux1, uy1 = _unit(verts[-1][0] - verts[-2][0], verts[-1][1] - verts[-2][1])
+        path = []
+        if ext0:
+            path.append((verts[0][0] + ux0 * ext0, verts[0][1] + uy0 * ext0))
+        path.extend(_affine(v) for v in verts)
+        if ext1:
+            path.append((verts[-1][0] + ux1 * ext1, verts[-1][1] + uy1 * ext1))
+        # 走廊横移（整笔恒定法向偏置）+ 低频手颤（沿弧长正弦）+ ±0.7px 微抖；
+        #    合成法向偏移 clamp ±9px（横移 6px + 手颤 3px 的理论上限，保 off-ink）。
+        #    ⚠ 横移不能直接施加在重采样点上：拐角两侧法向近反向，相邻触点会被
+        #    拉开 ≈|lat1|+|lat2|（折返顶点实测 18px > 10px 硬约束）。斜坡追踪 +
+        #    逐对距离守卫（发射前校验 ≤9.5px，超限把 lat 向 0 收）双保险。
+        d0 = random.uniform(-6, 6) * off_scale * noise
+        ph = random.uniform(0, 2 * math.pi)
+        new_pts: list[tuple[int, int]] = []
+        s = 0.0
+        lat = 0.0          # 已生效的横向偏移
+        prev = None
+        prev_out = None    # 上一个**已发射**触点（含偏移+抖动后的整数点）
+        for px, py, tx, ty in _resample_polyline(path):
+            if prev is not None:
+                s += math.hypot(px - prev[0], py - prev[1])
+            prev = (px, py)
+            # 目标横向偏移 = 恒定横移 + 低频手颤；斜坡追踪（相邻 ≤2px）保平滑
+            lat_target = d0 + tremor_a * math.sin(2 * math.pi * s / tremor_wl + ph)
+            lat_target = max(-9.0, min(9.0, lat_target))
+            if lat_target - lat > 2.0:
+                lat += 2.0
+            elif lat - lat_target > 2.0:
+                lat -= 2.0
+            else:
+                lat = lat_target
+            # 法向 = 切向旋转 90°：(tx,ty) → (-ty,tx)。拐角两侧法向近反向时，
+            # 前点的 lat 与本点的 lat 反向叠加会把相邻触点拉开 ≈|lat1|+|lat2|
+            # （折返顶点实测 18px）→ **逐对守卫**：发射前校验与上一触点的实际距离
+            # （含 ±0.7px 抖动、取整后），超 9.5px 就把本点 lat 向 0 收——抖动
+            # 也在守卫内重抽，保证最终发射的两点距离 ≤9.5px < 10px 硬约束
+            # （连续手势，08-26 实证 50px+ 大跳被判"乱划"丢弃；留 0.5px 取整余量）。
+            nx, ny = -ty, tx
+            for _try in range(24):
+                jx = random.uniform(-0.7, 0.7) * noise
+                jy = random.uniform(-0.7, 0.7) * noise
+                pt = (int(round(px + nx * lat + jx)), int(round(py + ny * lat + jy)))
+                if prev_out is None or math.hypot(
+                    pt[0] - prev_out[0], pt[1] - prev_out[1]
+                ) <= 9.5:
+                    break
+                lat *= 0.5 if abs(lat) > 1.0 else 0.0
+            new_pts.append(pt)
+            prev_out = pt
+        # 重采样步长 6px → 相邻触点距离 ≤6+抖动 <10px，满足连续手势约束；
+        # 但分组/插值段假设"顶点=拐点"，6px 密点列会让插值退化成逐点透传（无害，
+        # 步长上限 10px 不变），孤立点 held_pts 语义不受影响
+        out.append(new_pts)
+
+    notes = [
+        f"affine(±{aff_dx:.1f},{aff_dy:.1f}px,{math.degrees(aff_rot):+.2f}°)",
+        f"order[{','.join(str(i + 1) for i in order)}]" if order != sorted(order) else "",
+        f"rev×{rev_n}" if rev_n else "",
+    ]
+    return out, [x for x in notes if x]
 
 
 def _merge_pair(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -324,13 +498,15 @@ class TuyinTuMo(CustomAction):
             merge_notes: list[str] = []
             if n > 0:
                 abs_strokes, merge_notes = _random_merge(abs_strokes, n)
-            # ---- noise ①：拐点坐标抖动（±2px 内，插值步长 ≤10px 约束仍满足）----
+            # ---- noise v2（①-⑤）：_humanize_strokes 空间随机（走廊横移+手颤+过冲+
+            #      方向/笔序+全局仿射）。输出 6px 重采样密点列（非拐点稀疏列），后续
+            #      分组逻辑不变（点数变多只影响日志长度），插值段 ≤10px 步长约束
+            #      由"相邻触点 ≤6+1.4px"天然满足 ----
+            human_notes: list[str] = []
             if n > 0:
-                abs_strokes = [
-                    [_jit(pt, 2.0 * n) if k in (0, len(s) - 1) else _jit(pt, 1.0 * n)
-                     for k, pt in enumerate(s)]
-                    for s in abs_strokes
-                ]
+                abs_strokes, human_notes = _humanize_strokes(
+                    abs_strokes, (roi[0], roi[1]), clean, n
+                )
             logger.info(
                 f"[tuyinTuMo] 第{round_i}轮识别：{len(abs_strokes)} 笔, "
                 f"覆盖 {strokes.coverage_ratio * 100:.0f}%, 绝对坐标: "
@@ -339,6 +515,7 @@ class TuyinTuMo(CustomAction):
                     for i, s in enumerate(abs_strokes)
                 )
                 + (f"，连笔: {','.join(merge_notes)}" if merge_notes else "")
+                + (f"，人化: {','.join(human_notes)}" if human_notes else "")
             )
 
             # ③ 涂墨：每笔一次点击（touch_down → 组内插值 touch_move → touch_up）。
