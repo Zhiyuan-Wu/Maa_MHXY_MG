@@ -27,23 +27,25 @@ ROLES = {
     # "队长": "127.0.0.1:16608",  # id=7 title=6 龙宫
     "队长": "127.0.0.1:16736",  # id=11 title=10 方寸
     "梦蝶": "127.0.0.1:16672",  # id=9 title=8 地府
-    "六仔": "127.0.0.1:16640",  # id=8 title=7 大唐
     "离歌": "127.0.0.1:16704",  # id=10 title=9 魔王
+    "六仔": "127.0.0.1:16640",  # id=8 title=7 大唐
 }
 PACKAGE = "com.netease.my"
 
 # 组队副本 = 5 本 fuben69new 串联（每本一个 entry，override 选目标）+ ZHUOGUI_ROUNDS 轮捉鬼。
 # (是否侠士, 第几个)：侠士 idx∈{1,2}=50侠士/70侠士；普通 idx∈{1,2,3}=50普通-1/2、70普通。
 FUBEN69NEW_PLAN = [
-    (True, 1),   # 50侠士
-    (True, 2),   # 70侠士
+    # (True, 1),   # 50侠士
+    # (True, 2),   # 70侠士
     (False, 1),  # 50普通-1
     (False, 2),  # 50普通-2
     (False, 3),  # 70普通
 ]
+if datetime.now().weekday() in [0]:
+    FUBEN69NEW_PLAN = [(True, 1), (True, 2)] + FUBEN69NEW_PLAN
 
 # 副本完成、桥接捉鬼后跑几轮鬼。注意 **实际轮数 = max_hit + 1**（详见 run_5r.py 注释）。
-ZHUOGUI_ROUNDS = 5 if datetime.now().weekday() not in [3, 4] else 4
+ZHUOGUI_ROUNDS = 3#5 if datetime.now().weekday() not in [3, 4] else 4
 
 # 队长单人无限捉鬼模式的 override（``python run_5r.py --config team2 zhuagui`` 用）。
 ZHUAGUI_OVERRIDE = {
@@ -79,9 +81,9 @@ if datetime.now().weekday() < 5:    # 工作日
     SOLO_ENTRIES.append("kejuxiangshi")
 
 SOLO_MAP = {
-    "队长": SOLO_ENTRIES,
-    "欢喜": ["huoli_linshifu"] + SOLO_ENTRIES,
-    "梦蝶": ["huoli_linshifu"] + SOLO_ENTRIES,
+    "队长": ["huoli_linshifu"] + SOLO_ENTRIES,
+    # "欢喜": SOLO_ENTRIES,
+    "梦蝶": SOLO_ENTRIES,
     "六仔": SOLO_ENTRIES,
     "离歌": ["huoli_linshifu"] + SOLO_ENTRIES,
 }
