@@ -61,10 +61,16 @@ NODES = [
     ('藏宝图-主界面使用', False),               # 9  挖宝图真挖（>0）
     ('活动-科举乡试-开始', False),             # 10 科举真开门（每号 ≥1）
     ('fuben69new-进入', True),                  # 11 进本佐证（前缀）
+    ('拓印考验-弹窗识别', False),               # 12 拓印弹窗触发（maafw 层，每触发 1 hit）
 ]
 NODE_IDX = {name: i for i, (name, _) in enumerate(NODES)}
 
 VERIFY_TASKS = ['yunbiao_renwu2', 'mijing_renwu', 'wabaotu_qingli', 'kejuxiangshi']
+
+# 拓印触发明细要捞的 loguru 关键词（[tuyinTuMo] 行内容匹配；经 ensure_ascii 传远端）
+TUYIN_KEYS = ['拓印弹窗不在场', '轮识别', '轮涂墨', '完成度回读', '已点「完成」',
+              '点「换纸」', '额度已用尽', '「换纸」不在场', '界面取证',
+              '轮未识别到笔画', '未达标']
 
 RE_LINE_TS = re.compile(r'^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\] ?(.*)$')
 KEYWORD = re.compile(r'!!!|Traceback|Error|异常|持续死亡|画面未变|未就绪|L3 实例级|cancel')
@@ -272,6 +278,30 @@ try:
     for q in dict.fromkeys(miss): print('NEWQ\t'+q)
 except FileNotFoundError:
     print('NOFILE')
+print('###TUYIN')
+# tuyinTuMo event extraction from loguru + snapshot dir listing.
+# (Comments here must stay ASCII: whole REMOTE_SCAN body goes over an ascii-only ssh channel.)
+# Evidence: loguru "[tuyinTuMo] ..." lines; keywords passed via CFG (ensure_ascii).
+# loguru line format: 2026-09-10 14:52:02.123 | INFO | agent.custom.action.tuyinTuMo:... | [tuyinTuMo] xxx
+tu_re=re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[^\|]*\|[^\|]*\|[^\|]*\| \[tuyinTuMo\] (.*)$')
+KEYS=json.loads('@@TUYIN_KEYS@@')
+try:
+    for line in open(CFG['custom_log'],encoding='utf-8',errors='replace'):
+        m=tu_re.match(line)
+        if not m: continue
+        t,msg=m.group(1),m.group(2).strip()
+        if any(k in msg for k in KEYS):
+            print('T\t%s\t%s'%(t[11:19], msg.encode('unicode_escape').decode('ascii')))
+except FileNotFoundError:
+    print('NOFILE')
+# snapshot dir (before/after PNGs written by tuyinTuMo; may predate today)
+td=D+'/tuyin'
+try:
+    for f in sorted(os.listdir(td)):
+        if f.startswith(CFG['date_dot']):
+            print('P\t'+f.encode('unicode_escape').decode('ascii'))
+except Exception:
+    pass
 print('###OE')
 oe=D+'/on_error'; td=D+'/timeout'
 for sub in (oe,td):
@@ -330,10 +360,11 @@ def remote_scan(date_hyphen, want_entries):
         'want_entries': sorted(set(want_entries) | set(VERIFY_TASKS)),
     }
     script = REMOTE_SCAN.replace('@@CFG@@', json.dumps(cfg, ensure_ascii=True))
+    script = script.replace('@@TUYIN_KEYS@@', json.dumps(TUYIN_KEYS, ensure_ascii=True))
     out = ssh_py(script)
     if not out:
         return {}
-    res = {'cust': [], 'newq': [], 'oe': [], 'maafw': [], 'cov': []}
+    res = {'cust': [], 'newq': [], 'oe': [], 'maafw': [], 'cov': [], 'tuyin': [], 'tuyin_png': []}
     sec = None
     for line in out.splitlines():
         if line.startswith('###'):
@@ -341,6 +372,14 @@ def remote_scan(date_hyphen, want_entries):
             continue
         if sec == 'CUST':
             res['cust'].append(line.split('\t'))
+        elif sec == 'TUYIN':
+            parts = line.split('\t')
+            if parts[0] == 'T' and len(parts) >= 3:
+                # 远端 unicode_escape 传中文（ASCII 通道），本地反转义
+                parts[2] = parts[2].encode('ascii').decode('unicode_escape')
+                res['tuyin'].append((parts[1], parts[2]))
+            elif parts[0] == 'P':
+                res['tuyin_png'].append(parts[1].encode('ascii').decode('unicode_escape'))
         elif sec == 'OE':
             parts = line.split('\t')
             if len(parts) >= 3:
@@ -451,6 +490,70 @@ def report_keju(cache_path, tiku_path, date_hyphen, cust):
         print(f'- Q: {(v.get("question") or k)[:60]}')
         print(f'  AI答: {v.get("answer")!r}   选项: {opts}')
     print('（错的给正解并改 cache —— cache 存答案文本；权威文件在 Mac 侧，改完须同步。学术争议题保留 AI 答案+备注。）')
+
+
+# ---------------------------------------------------------------- 拓印触发明细
+def report_tuyin(jobs, scan, arch, no_scp):
+    """拓印考验触发情况汇总（2026-09-10 加）。
+
+    三类证据交叉：
+      ① 编排日志 tuoyinjiance solo 窗口（谁跑了检测、多久——"检测"本身不算触发）；
+      ② maafw `拓印考验-弹窗识别` reco hit（弹窗真出现 = 真触发，每号每窗口 1 hit）；
+      ③ loguru [tuyinTuMo] 行（涂墨轮次/完成度/换纸/关闭/界面取证路径——Python 段明细）。
+    输出：每号触发表（检测次数 / 弹窗触发数 / 结局）+ loguru 明细时间线 + PNG 归档。
+    """
+    hits12 = [p for p in scan.get('maafw', []) if p[0] == 'H' and int(p[3]) == 12]
+    print('**拓印考验触发汇总**（弹窗非必现——检测跑≠触发）')
+    rows = []
+    for job in jobs:
+        for role in job['roles']:
+            wins = job['solo_win'].get((role, 'tuoyinjiance'), [])
+            if not wins:
+                continue
+            for st, en in wins:
+                n = len([1 for p in hits12 if st <= p[1] <= en])
+                rows.append((job['file'], role, f'{st}-{en}', len(wins), n))
+    if rows:
+        print('| job | 号 | 检测窗口 | 弹窗触发 | 判定 |')
+        print('|---' * 4 + '|')
+        for jf, role, win, durs, n in rows:
+            verdict = '✅ 通过/涂墨' if n > 0 else '— 弹窗未出现（正常，非必现）'
+            print(f'| {jf} | {role} | {win} | {n} | {verdict} |')
+    else:
+        print('（当日无 tuoyinjiance solo 窗口：full/checkin 外的模式不跑检测）')
+
+    ev = scan.get('tuyin', [])
+    if ev == [['NOFILE']] or not ev:
+        if not rows or all(r[4] == 0 for r in rows):
+            print('loguru 无 [tuyinTuMo] 行（弹窗未触发过 = 正常态）')
+    else:
+        print(f'\n**[tuyinTuMo] loguru 明细（{len(ev)} 行）**：')
+        for t, msg in ev:
+            print(f'  {t}  {msg[:150]}')
+        # 结局统计
+        done = sum(1 for _t, m in ev if '已点「完成」' in m)
+        hz = sum(1 for _t, m in ev if '点「换纸」' in m)
+        cl = sum(1 for _t, m in ev if '「换纸」不在场' in m or '额度已用尽' in m)
+        snap = sum(1 for _t, m in ev if '界面取证' in m)
+        print(f'结局计数：点完成 {done} | 换纸 {hz} | 关闭兜底 {cl} | 取证截图行 {snap}')
+
+    pngs = scan.get('tuyin_png', [])
+    if pngs:
+        print(f'\n界面取证截图（Mac debug/debug/tuyin/，当日 {len(pngs)} 张）')
+        if not no_scp:
+            dst = os.path.join(arch, 'tuyin')
+            os.makedirs(dst, exist_ok=True)
+            ok = fail = 0
+            for f in pngs:
+                r = subprocess.run(['scp', '-q',
+                                    f'{MAC}:{MAC_REPO}/debug/debug/tuyin/{f}',
+                                    os.path.join(dst, f)], capture_output=True)
+                ok += r.returncode == 0
+                fail += r.returncode != 0
+            print(f'已归档 {ok} 张（失败 {fail}）→ {dst}')
+            for f in pngs:
+                print('  ' + os.path.join(dst, f))
+    return pngs
 
 
 # ---------------------------------------------------------------- team/solo 真干核实
@@ -668,6 +771,14 @@ def main():
     else:
         print('（跳过：远端不可用）')
 
+    # [6b] 拓印考验触发情况（弹窗非必现：检测跑≠触发，触发≠通过）
+    hr('[6b] 拓印考验（tuyin）触发情况 + 界面取证归档')
+    tuyin_pngs = []
+    if scan:
+        tuyin_pngs = report_tuyin(jobs, scan, arch, args.no_scp)
+    else:
+        print('（远端不可用：跳过）')
+
     # [7][8] maafw 覆盖 + 核实
     if not args.fast and scan:
         hr('[7] maafw bak 覆盖表（trace 异常时选 bak 用）')
@@ -716,6 +827,9 @@ def main():
     if anom:
         manual.append('对以下异常逐个定位根因到节点级（按 §4.1：编排窗口→task start 拿 Tx→筛 Tx 命中序列）：\n    - '
                       + '\n    - '.join(anom))
+    if tuyin_pngs:
+        manual.append(f'读拓印界面取证截图（{len(tuyin_pngs)} 张，before/after 对照"识别了什么笔画/涂成了什么样"）：'
+                      f'用图像分析工具逐张读\n    ' + '\n    '.join(os.path.join(arch, 'tuyin', f) for f in tuyin_pngs[:8]))
     manual.append(f'写 report.md → {os.path.join(arch, "report.md")}（当天多 job 一份分章节：'
                   f'每 job 三份报告表格 + team 核实表 + 根因（节点级 trace + 截图画面结论）'
                   f'+ on_error 分布表 + 结论与待办）')

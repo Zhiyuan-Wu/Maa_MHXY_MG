@@ -19,6 +19,7 @@ import os
 import random
 import threading
 import time
+from datetime import datetime
 
 import numpy as np
 
@@ -36,6 +37,39 @@ _REPO_DIR = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", ".."))
 _DEFAULT_TEMPLATE = os.path.join(
     _REPO_DIR, "assets", "resource", "base", "image", "zonghe", "tuoyin.png"
 )
+# 前后界面取证目录（与 maafw 的 debug/debug 同级布局，5r_collect 归档时一并拉取）
+_TUYIN_SNAPSHOT_DIR = os.path.join(_REPO_DIR, "debug", "debug", "tuyin")
+
+
+def _save_snapshot(image: np.ndarray, tag: str, account: str) -> str | None:
+    """保存一张拓印处理段界面截图（BGR ndarray → PNG）。
+
+    :param image:   ctrl.post_screencap().get() 的整帧
+    :param tag:     "before"（识别前）/ "after"（操作后，点完成/换纸/关闭之后）
+    :param account: 账号标识（adb_serial），进文件名便于按号归档
+    :return:        落盘路径；失败返回 None（截图保存绝不影响涂墨主流程）
+
+    2026-09-10 加：拓印考验非必现（team1 同日正常、job2 堵入口），弹窗触发时
+    只有 maafw 的 reco 行，看不到"弹窗长什么样/涂成什么样"——before/after 两张
+    给 5r 排查留画面证据（识别之前的界面 + 操作之后的界面）。
+    """
+    try:
+        import cv2
+
+        if image is None or getattr(image, "size", 0) == 0:
+            return None
+        os.makedirs(_TUYIN_SNAPSHOT_DIR, exist_ok=True)
+        fname = (
+            f"{datetime.now().strftime('%Y.%m.%d-%H.%M.%S')}_{account}_{tag}.png"
+        )
+        path = os.path.join(_TUYIN_SNAPSHOT_DIR, fname)
+        cv2.imwrite(path, image)
+        # 5r_collect 靠这行日志找截图（与 maafw timeout 截图的编排日志行同构）
+        logger.info(f"[tuyinTuMo] 界面取证 {tag}: {path}")
+        return path
+    except Exception as e:
+        logger.warning(f"[tuyinTuMo] 保存 {tag} 截图失败（忽略继续涂墨）: {e}")
+        return None
 
 
 # ---------------- 人手噪声（noise 系数 0 = 完全旧行为） ----------------
@@ -368,11 +402,13 @@ class TuyinTuMo(CustomAction):
         if huanzhi_limit is None:
             huanzhi_limit = self._HUANZHI_LIMIT
         left = self._huanzhi_left(context)
+        account = self._account_tag(context).replace(":", "-")
         image = None
         try:
             image = ctrl.post_screencap().wait().get()
         except Exception:
             pass
+        _save_snapshot(image, "before_bailout", account)   # 兜底前的界面（轮次耗尽现场）
         if image is not None and left > 0:
             hz = context.run_recognition(
                 self._HUANZHI_NODE,
@@ -399,6 +435,12 @@ class TuyinTuMo(CustomAction):
                 )
                 ctrl.post_click(int(fx), int(fy)).wait()
                 time.sleep(1.0)   # 等换纸动画（新石碑弹出）
+                try:
+                    _save_snapshot(
+                        ctrl.post_screencap().wait().get(), "after_huanzhi", account
+                    )
+                except Exception:
+                    pass
                 return
         if left <= 0:
             logger.info(
@@ -418,6 +460,12 @@ class TuyinTuMo(CustomAction):
             time.sleep(1.0)   # 等弹窗收起
         except Exception as e:
             logger.warning(f"[tuyinTuMo] 点关闭异常（继续 fallback）：{e}")
+        try:
+            _save_snapshot(
+                ctrl.post_screencap().wait().get(), "after_close", account
+            )
+        except Exception:
+            pass
         try:
             context.run_task(fallback)
         except Exception as e:
@@ -458,6 +506,7 @@ class TuyinTuMo(CustomAction):
         n = max(0.0, min(1.0, noise))
 
         ctrl = context.tasker.controller
+        account = self._account_tag(context).replace(":", "-")   # 进文件名（127.0.0.1:16512 → -）
 
         for round_i in range(1, max_rounds + 1):
             image = ctrl.post_screencap().wait().get()
@@ -479,6 +528,10 @@ class TuyinTuMo(CustomAction):
             if not reco or not reco.hit:
                 logger.info("[tuyinTuMo] 拓印弹窗不在场（可能已通过/倒计时结束），跳过")
                 return CustomAction.RunResult(success=True)
+
+            # 进入 Python 处理段（弹窗确认在场）→ 保存"识别之前"的界面（每轮都存，
+            # 重涂轮的画面演进也有价值；文件名带时间戳自然区分）
+            _save_snapshot(image, f"before_r{round_i}", account)
 
             # ② 识别笔画 → 笔画路径（截图 BGR + BGR 色）
             raw, clean, strokes = tuyin_analyze(
@@ -659,6 +712,13 @@ class TuyinTuMo(CustomAction):
             ctrl.post_click(int(cx), int(cy)).wait()
             logger.info("[tuyinTuMo] 已点「完成」提交")
             time.sleep(3.0)
+            # 操作之后：完成提交、弹窗收起/结算动画后的界面
+            try:
+                _save_snapshot(
+                    ctrl.post_screencap().wait().get(), f"after_done_r{round_i}", account
+                )
+            except Exception:
+                pass
             return CustomAction.RunResult(success=True)
 
         self._bailout(
