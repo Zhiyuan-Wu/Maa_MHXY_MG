@@ -2171,25 +2171,56 @@ class RoleBoot:
         except Exception:
             return False
 
+    # ---- act-first gate（2026-09-13 提速）：确知 probe 首轮必败就直接 act，省烧满轮询预算 ----
+    # 三个 gate 的误判方向都是"多 act 一次"：heal_booted 内部自会复查 be_instance_started、
+    # monkey 幂等（已运行时只是带到前台）、heal_connected 建的 tasker 本就是必经产物——
+    # act 无害。gate 查询失败一律 False（保守 probe-first，多等一个 budget 不冒进）。
+
+    def _gate_launch_needed(self):
+        """BOOTED gate：实例进程没起 → adb 必然不可能就绪，直接 launch（省 180s 轮询）。"""
+        try:
+            return not be_instance_started(self.idx)
+        except Exception:
+            return False
+
+    def _gate_game_dead(self):
+        """GAME_ALIVE gate：三态探针**明确 False**（pidof miss / focus 非游戏）→ 直接 monkey。
+        True（活着）/ None（查询失败不置信）都走 probe-first——None 时 act 反而冒进
+        （Tailscale 抖动会误杀健康号，见 _game_activity_alive 三态语义）。"""
+        try:
+            return _game_activity_alive(self.adb, self.addr, self.package) is False
+        except Exception:
+            return False
+
+    def _gate_tasker_missing(self):
+        """CONNECTED gate：tasker 还没建 → probe_connected 恒 False（tasker 只在
+        heal_connected 里创建），纯死等 60s——直接建。"""
+        return self.tasker is None
+
     # ---- 台阶三元组表（一处可查，替代 4 个签名散参数）----
 
     def stage_spec(self, stage):
         """(probe, act_or_heal, budget, 名称, act_first, heal_max)——act_or_heal=None 表示无轻恢复。
-        ``act_first``（act 型台阶）：**先执行 act（无条件跑登录）再 probe 验证**——用于
-        LOGGED_IN。为什么 probe-first 在这里是错的：start 的职责不只是"验证已登录"，
-        更是**执行登录**（点登录游戏、过协议、选角）——游戏起在登录界面时 _MAIN_RECO
+        ``act_first``（bool | callable）：True=先无条件执行 act（=heal）再 probe 验证，callable
+        （gate）=返回 True 才 act。**无条件 act 型**仅 LOGGED_IN：start 的职责不只是"验证已
+        登录"，更是**执行登录**（点登录游戏、过协议、选角）——游戏起在登录界面时 _MAIN_RECO
         模板照样命中（右侧竖条低特异性），probe-first 会把"没登录"误判为"已登录"而永不
         触发 act（2026-08-30 实证：5 台全停登录界面、LOGGED_IN 全假阳性）。act-first 对齐
         旧 launch() 语义：无条件跑 start+panduan，已登录号走资源层的秒退出口
-        （start.json 启动游戏.next 首候选=主界面），代价可忽略。"""
+        （start.json 启动游戏.next 首候选=主界面），代价可忽略。
+        **gate 型**（2026-09-13 提速）用于 BOOTED/GAME_ALIVE/CONNECTED：冷启动下这三阶
+        probe 首轮必败（实例没起轮询 adb 恒 False / ``launch -pkg`` 不能可靠拉游戏 90s 必烧满
+        / tasker 没建 probe 恒 False），gate 确知必败就直接 act；温启动 gate 返回 False 照旧
+        probe-first 秒过（快路径不变）。"""
         if stage == BootStage.BOOTED:
-            return self.probe_booted, self.heal_booted, 180, "BOOTED(adb就绪)", False, BOOT_HEAL_MAX["BOOTED"]
+            return (self.probe_booted, self.heal_booted, 180, "BOOTED(adb就绪)",
+                    self._gate_launch_needed, BOOT_HEAL_MAX["BOOTED"])
         if stage == BootStage.GAME_ALIVE:
             return (self.probe_game, self.heal_game, BOOT_STAGE_BUDGET["GAME_ALIVE"],
-                    "GAME_ALIVE(游戏前台)", False, BOOT_HEAL_MAX["GAME_ALIVE"])
+                    "GAME_ALIVE(游戏前台)", self._gate_game_dead, BOOT_HEAL_MAX["GAME_ALIVE"])
         if stage == BootStage.CONNECTED:
             return (self.probe_connected, self.heal_connected, BOOT_STAGE_BUDGET["CONNECTED"],
-                    "CONNECTED(tasker)", False, BOOT_HEAL_MAX["CONNECTED"])
+                    "CONNECTED(tasker)", self._gate_tasker_missing, BOOT_HEAL_MAX["CONNECTED"])
         if stage == BootStage.LOGGED_IN:
             return (self.probe_logged_in, self.heal_logged_in, BOOT_STAGE_BUDGET["LOGGED_IN"],
                     "LOGGED_IN(主界面)", True, BOOT_HEAL_MAX["LOGGED_IN"])
@@ -2237,14 +2268,20 @@ class RoleBoot:
     def heal_logged_in(self):
         if self.tasker is None:
             return False
-        # 错峰（2026-09-01 补）：温启动（实例已起、游戏前台）时 5 台 act-first 会在 ~11s 内
-        # 齐发 5 个 StartApp+登录，压满宿主 CPU/磁盘/ADB——正是 LAUNCH_STAGGER 要防的形态
-        # （冷启动下 BOOTED 错峰间接带开了 act，掩盖了此缺口；solo 温启动暴露）。act 持
-        # BOOT_LAUNCH_SEMAPHORE（与拉实例共用一把——两者本就该全局互斥错峰），start 本体
-        # ~70s ≫ stagger 20s，持锁即天然错开；start 完成后不额外 sleep（start 本身耗时够了）。
+        global BOOT_LAUNCH_SEMAPHORE
+        if BOOT_LAUNCH_SEMAPHORE is None:
+            BOOT_LAUNCH_SEMAPHORE = threading.Semaphore(1)
+        # 错峰（2026-09-01 引入、2026-09-13 改入口限速）：目的只是"相邻 StartApp+登录
+        # **起跑**间隔 ≥LAUNCH_STAGGER"（v1 launch_parallel / LAUNCH_STAGGER 语义），不是
+        # 登录全程互斥——持锁跑完整个 start 把 5 台登录串成 ~430s。改为锁内只睡 stagger
+        # （占一个错峰槽）后放锁跑 start：起跑仍逐台 ≥20s 错开（防齐发压满宿主，09-01
+        # commit adb2b96 的意图），登录本体可重叠（solo_all/team_run 全天 5 tasker 并发
+        # 跑 pipeline，重叠本身是既有常态）。act/heal 重试每次同样占槽（重试也错峰）；
+        # 首台也睡 stagger——对称性换简单，20s 一次不值引入全局时间戳。
         with BOOT_LAUNCH_SEMAPHORE:
-            return _run_login_pipelines(self.tasker, self.adb, self.addr, self.package,
-                                        timeout=TIMEOUTS["start"])
+            time.sleep(LAUNCH_STAGGER)
+        return _run_login_pipelines(self.tasker, self.adb, self.addr, self.package,
+                                    timeout=TIMEOUTS["start"])
 
     # ---- 引擎级兜底：实例重启（唯一能覆盖所有故障面的原语；跨开机+运行中共用 BOOT_RESTART_MAX 次额度）----
 
@@ -2299,7 +2336,15 @@ def boot_role(rb, target=BootStage.LOGGED_IN):
     while rb.stage < target:
         stage = BootStage(rb.stage + 1)
         probe, heal, budget, name, act_first, heal_max = rb.stage_spec(stage)
-        if act_first:
+        # act_first 可为 bool 或 callable（gate）：callable 返回 True 才 act——冷启动下
+        # BOOTED/GAME_ALIVE/CONNECTED 的 probe 首轮必败（实例没起/launch -pkg 不可靠/
+        # tasker 还没建），gate 确知必败就直接 act，省烧满轮询预算（2026-09-13 提速）。
+        # gate 查询失败退回保守的 probe-first（多等一个 budget，方向安全）。
+        try:
+            gate = bool(act_first()) if callable(act_first) else bool(act_first)
+        except Exception:
+            gate = False
+        if gate:
             try:
                 print(f"    [boot:{rb.role}] {name} act-first：无条件执行登录再验证")
                 heal()
