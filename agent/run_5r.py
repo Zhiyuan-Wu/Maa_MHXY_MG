@@ -1071,7 +1071,7 @@ def _save_timeout_screenshot(tasker, label):
 
 
 def run_task(tasker, entry, override=None, timeout=600, label=None, watch_alive=None,
-             watch_dead_streak=3, sentinel=None):
+             watch_dead_streak=3, sentinel=None, *, on_outcome=None):
     """跑一个**原生** entry，带墙钟超时：超时则 ``post_stop`` 中断。返回是否在超时内完成。
 
     自动合并 ``DEFAULT_OVERRIDES`` 里的项目建议默认值（如运镖跳过活力检测）。
@@ -1096,6 +1096,10 @@ def run_task(tasker, entry, override=None, timeout=600, label=None, watch_alive=
     （走 on_error→空节点）→ run_task 返回 False，不让空节点伪装成成功。默认 None=不校验（维持
     旧行为）。solo_all 传 ``_sentinel_main``（主界面模板识别）以抓"任务 done 但角色停在挖宝/战斗/
     弹窗界面"的假完成（8/6 欧阳挖宝卡死→后续 7 任务全假完成即此症）。
+    ``on_outcome``：keyword-only 可选 ``(outcome: str, elapsed: float) -> None`` 回调，在**全部四个
+    出口**上报（done / sentinel_fail / dead_streak / timeout；elapsed=函数内实算耗时，不受外层
+    计时粒度影响）。默认 None 零开销——既有调用点全不动。solo_all 用它做冻结检测（触发 A 超时
+    诊断 / 触发 B 连续 41s sentinel_fail 计数），返回值仍为 bool 保持兼容。
     """
     label = label or entry
     ov = dict(override or {})
@@ -1114,8 +1118,12 @@ def run_task(tasker, entry, override=None, timeout=600, label=None, watch_alive=
                 # done 但 sentinel 不满足 = 走了空节点假成功（default_pipeline 全局 on_error:["空节点"]
                 # 让 next 超时也"成功"）。不计完成，让上层按失败处理（solo_all 计超时统计等）。
                 print(f"!!! {label} done 但 sentinel 判未达成（疑 on_error→空节点假成功），按失败计")
+                if on_outcome is not None:
+                    on_outcome("sentinel_fail", time.time() - _t0)
                 return False
             print(f"<<< {label} 完成（用时 {int(time.time() - _t0)}s）")
+            if on_outcome is not None:
+                on_outcome("done", time.time() - _t0)
             return True
         if watch_alive is not None:
             v = watch_alive()
@@ -1125,6 +1133,8 @@ def run_task(tasker, entry, override=None, timeout=600, label=None, watch_alive=
                     tasker.post_stop().wait()
                     _save_timeout_screenshot(tasker, label)
                     print(f"!!! {label} 游戏持续判死 {watch_dead_streak}s（主进程/主Activity 塌），提前 stop（用时 {int(time.time() - _t0)}s）")
+                    if on_outcome is not None:
+                        on_outcome("dead_streak", time.time() - _t0)
                     return False
             elif v is True:
                 dead_streak = 0     # None（查询失败）：不计 miss 也不清零
@@ -1132,6 +1142,8 @@ def run_task(tasker, entry, override=None, timeout=600, label=None, watch_alive=
     tasker.post_stop().wait()
     _save_timeout_screenshot(tasker, label)  # stop 后补一张超时截图（兜底循环不触发 on_error 的场景必备）
     print(f"!!! {label} 超时 {timeout}s，已 stop")
+    if on_outcome is not None:
+        on_outcome("timeout", time.time() - _t0)
     return False
 
 
@@ -1187,6 +1199,80 @@ def _screencap(tasker):
     if img is None or getattr(img, "size", 0) == 0:
         return None
     return img
+
+
+def _screencap_bounded(tasker, wait_s=None, label="freeze_probe"):
+    """有界截图：超时/抛错/空帧都返 None（区别于 _screencap 的无限 ``.wait()``）。
+
+    为什么必须有界：MaaFw 的 ``post_screencap().wait()`` **没有超时参数**——controller 的 adb
+    子进程挂死在 read() 时（2026-09-17 队长/离歌 VM 冻结案）它会永远阻塞。复用 ``_wait_job``
+    的线程+join 模板：``.wait()`` 放守护线程跑，主线程 deadline 轮询取结果；超时说明截图通道
+    楔死（本身就是冻结判据之一，不视为探针失败）。
+
+    ``wait_s=None``（缺省）在**函数体内**解析 FREEZE_PROBE_SCREENCAP_WAIT——该常量定义在
+    模块后段（BOOT_* 常量区），本函数位置更早，默认参数在 def 时求值会 NameError。
+    """
+    if wait_s is None:
+        wait_s = FREEZE_PROBE_SCREENCAP_WAIT
+    box = []
+
+    def _w():
+        try:
+            box.append(tasker.controller.post_screencap().wait().get())
+        except Exception:
+            box.append(None)
+
+    threading.Thread(target=_w, daemon=True).start()
+    deadline = time.time() + wait_s
+    while time.time() < deadline:
+        if box:
+            img = box[0]
+            return img if (img is not None and getattr(img, "size", 0)) else None
+        time.sleep(0.2)
+    print(f"    !!! {label} 截图 {wait_s}s 未返回（疑 controller/adb 楔死）")
+    return None
+
+
+def _diagnose_freeze(tasker, role, adb, address):
+    """solo 任务墙钟超时后的冻结诊断（触发 A）。返回判定串，调用方只对 frozen/wedged 升级 L3：
+
+      wedged  = 截图通道挂死（_screencap_bounded 超时/抛错/空帧）—— 09-17 案超时时刻的直接形态；
+      frozen  = 三帧两次帧差全相同 + 游戏前台活着 —— VM 冻结渲染（09-17 案 post_stop 解开通道
+                后的形态：画面停在冻结前最后一帧，超时截图时钟停摆即此）；
+      alive   = 帧在动 —— 普通游戏内超时（卡战斗/卡对话），不升级；
+      dead    = _game_activity_alive 判 False —— 游戏进程/前台塌了，归 watch_alive/L3 爬梯管，
+                不走本诊断的冻结路径；
+      unknown = 探针不可置信（adb 通信失败 None）—— 无据不判（Tailscale 抖动会误杀健康号），
+                不升级。
+
+    帧差取**两对**（s1/s2/s3 三帧）：健康主界面站桩静帧可能单对字节相同，两对全同才判 frozen。
+    误报代价 = 白重启一次实例（~3-5min + 占 BOOT_RESTART_MAX 额度）；漏报代价 = 后续任务恒
+    41s 假成功刷脏账号统计——偏抓。整体墙钟 ≤ FREEZE_PROBE_TOTAL_BUDGET（activity 探针
+    ~1.5s + 3 次有界截图 ≤10s + 2×帧差间隔）。
+    """
+    t0 = time.time()
+    alive = _game_activity_alive(adb, address)
+    if alive is False:
+        return "dead"
+    if alive is None:
+        return "unknown"
+    s1 = _screencap_bounded(tasker, label=f"freeze_probe[{role}]#1")
+    if s1 is None:
+        return "wedged"
+    time.sleep(FREEZE_PROBE_FRAME_GAP)
+    s2 = _screencap_bounded(tasker, label=f"freeze_probe[{role}]#2")
+    if s2 is None:
+        return "wedged"
+    if s1.tobytes() != s2.tobytes():
+        return "alive"
+    time.sleep(FREEZE_PROBE_FRAME_GAP)          # 第二对帧差：防主界面站桩静帧误判
+    s3 = _screencap_bounded(tasker, label=f"freeze_probe[{role}]#3")
+    if s3 is None:
+        return "wedged"
+    if s1.tobytes() == s3.tobytes():
+        print(f"!!! [{role}] 超时后诊断：三帧全同（用时 {int(time.time() - t0)}s），画面冻结")
+        return "frozen"
+    return "alive"
 
 
 def _recognize(tasker, reco_type, reco_param, img):
@@ -1636,7 +1722,8 @@ def team_dungeon(taskers, member_names, timeouts=None):
 
 # ---------------- 能力 3：并行单人 pipeline ----------------
 
-def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=None, solo_timeouts=None):
+def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=None, solo_timeouts=None,
+             *, role_boots=None):
     """5 账号**并行**执行单人 pipeline；每个账号内**顺序**跑自己的任务列表。
 
     ids: ``None``=全部账号；或账号 id 集合（1-based，按 ``ROLES`` 顺序，连接日志里有 ``[id] 角色``）。
@@ -1656,6 +1743,13 @@ def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=
         实现是"收缩式"：每个任务实际 timeout = ``min(单任务超时, 距整轮截止的剩余时间)``，于是
         ``run_task`` 现有的单任务超时机制自然把整轮截止传到每个任务——无需额外看门狗线程，整轮
         截止被各账号在 ~1s 轮询粒度内一致地兑现。
+
+    ``role_boots``（keyword-only）：``{role: RoleBoot}`` 运行中恢复通道（main 传入 boot_all 结果）。
+    接线两处冻结检测（2026-09-17 队长/离歌 VM 冻结案的堵法），None = 不恢复（拓印跑等轻量场景）：
+      - 触发 A：任务墙钟超时后 ``_diagnose_freeze`` 判 frozen/wedged → ``_salvage_role`` L3 救回；
+      - 触发 B：同号连续 ``FREEZE_41S_STREAK`` 个任务 sentinel 判失败且耗时在 ``FREEZE_41S_WINDOW``
+        （41s 空节点假成功指纹）→ 同上。
+      救回成功后**从下一个任务继续**（被打断任务不重跑）；失败/额度用尽则放弃该号剩余任务。
     """
     items = list(taskers.items())  # [(role, tasker)]，按 ROLES 顺序
     chosen = [(r, t) for i, (r, t) in enumerate(items, 1) if ids is None or i in ids]
@@ -1687,6 +1781,10 @@ def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=
     overall_deadline = (time.time() + overall_timeout) if overall_timeout else None
 
     def one(role, t):
+        rb = (role_boots or {}).get(role)
+        adb = _adb_for_mode()           # 冻结诊断用（remote=Mac adb / local=MuMu adb.exe）
+        addr = ROLES.get(role)          # config（如 team2）在模块加载时已覆盖 ROLES，取到的即实际端口
+        streak_41s = 0                  # 连续 sentinel_fail 且耗时在 41s 窗口内的计数（触发 B）
         for e in _entries_for(role):
             left = (overall_deadline - time.time()) if overall_deadline else None
             if left is not None and left <= 0:
@@ -1695,13 +1793,47 @@ def solo_all(taskers, entries=None, ids=None, per_timeout=3600, overall_timeout=
             _barrier_reset(t, role)   # 任务间隔离：sleep5 + 打开大地图重置位置（防前一任务卡死污染）
             entry_to = (solo_timeouts or {}).get(e, per_timeout)
             this_to = entry_to if left is None else min(entry_to, left)
+            outcome_box = {}           # run_task on_outcome 回填 {'outcome': str, 'elapsed': float}
             try:
                 run_task(t, e, timeout=this_to, label=f"[{role}] 单人 {e}",
-                         sentinel=lambda: _sentinel_main(t))
+                         sentinel=lambda: _sentinel_main(t),
+                         on_outcome=lambda oc, el: outcome_box.update(outcome=oc, elapsed=el))
             except Exception:
                 print(f"    [{role}] !!! {e} 抛异常：")
                 traceback.print_exc()
                 raise
+            if rb is None or not outcome_box:
+                continue                # 无恢复通道（拓印跑等）或没拿到结果：维持旧行为
+            oc, el = outcome_box["outcome"], outcome_box["elapsed"]
+            # ---- 触发 B：连续 FREEZE_41S_STREAK 个 sentinel 判失败的 41s 假成功 ----
+            # （口径保守：只计 sentinel_fail——被误放行的"41s 完成"不纳入；timeout/正常完成清零。
+            #   barrier 不计：_barrier_reset 内的 run_task 不传 on_outcome，冻结时走 60s 超时归触发 A。）
+            if oc == "sentinel_fail" and FREEZE_41S_WINDOW[0] <= el <= FREEZE_41S_WINDOW[1]:
+                streak_41s += 1
+            else:
+                streak_41s = 0
+            if streak_41s >= FREEZE_41S_STREAK:
+                print(f"!!! [{role}] 连续 {FREEZE_41S_STREAK} 个任务耗时 {FREEZE_41S_WINDOW[0]}-{FREEZE_41S_WINDOW[1]}s "
+                      f"且 sentinel 判失败（41s 空节点指纹，疑实例脑死），升级 L3 实例重启")
+                streak_41s = 0
+                if _salvage_role(rb):
+                    t = rb.tasker       # 后续任务用重建的 tasker
+                else:
+                    print(f"    [{role}] L3 救回失败，放弃该号剩余单人任务")
+                    return
+                continue                # 从下一个任务继续（被打断任务不重跑）
+            # ---- 触发 A：墙钟超时后诊断 adb 卡死/画面冻结 ----
+            if oc == "timeout":
+                verdict = _diagnose_freeze(t, role, adb, addr)
+                if verdict in ("frozen", "wedged"):
+                    print(f"!!! [{role}] 超时诊断为 {verdict}，升级 L3 实例重启")
+                    if _salvage_role(rb):
+                        t = rb.tasker
+                    else:
+                        print(f"    [{role}] L3 救回失败，放弃该号剩余单人任务")
+                        return
+                    # 不重跑当前任务：从下一个任务继续
+                # alive/dead/unknown：普通游戏内超时/游戏塌/探针不可置信，维持现状继续下一任务
 
     with ThreadPoolExecutor(max_workers=len(chosen)) as ex:
         list(ex.map(one, [r for r, _ in chosen], [t for _, t in chosen]))
@@ -2095,6 +2227,17 @@ BOOT_RESTART_MAX = 2            # 实例重启额度：全程每台 2 次（原 
 BOOT_INSTANCE_DEADLINE = 2400   # 单台从 OFF 到 LOGGED_IN 的墙钟硬顶（> Σ预算+重启 470s×2+余量）
 BOOT_LAUNCH_SEMAPHORE = None    # 惰性建：错峰信号量（保证相邻实例 launch 间隔 ≥ LAUNCH_STAGGER）
 
+# ---- 冻结检测 + 运行中 L3 救回（2026-09-17 队长/离歌 VM 冻结案的堵法）----
+# 当晚两台 MuMu 实例同秒 VM 冻结：MaaFw adb screencap 子进程 read() 无限挂死，Tasker 静默
+# 29min 到墙钟超时；post_stop 后画面仍冻结 → 后续任务恒 41s（2×20s 识别超时→空节点）假成功。
+# 触发 A：solo 任务墙钟超时后 _diagnose_freeze 判 frozen/wedged → _salvage_role L3 救回。
+# 触发 B：同号连续 FREEZE_41S_STREAK 个任务以 sentinel_fail 收场且耗时落在窗口内 → 同上。
+FREEZE_41S_WINDOW = (35, 60)        # "41s 假成功"指纹窗口（poll 粒度 ±1s，放宽到 35–60）
+FREEZE_41S_STREAK = 3               # 连续 N 个 sentinel_fail 的 41s 任务 → 判实例脑死升级 L3
+FREEZE_PROBE_SCREENCAP_WAIT = 10    # 诊断截图单次有界等待秒数（job.wait() 无超时，必须线程+join 兜）
+FREEZE_PROBE_FRAME_GAP = 3.0        # 帧差对比间隔（_ready_main 用 2.5s，这里放宽一点）
+FREEZE_PROBE_TOTAL_BUDGET = 30      # 整个诊断的墙钟上限（超了按 unknown 处理，不升级）
+
 # 停尸房（2026-09-06）：退役 tasker 持有到进程退出，**永不触发 MaaTaskerDestroy**。
 # 为什么：restart_instance/heal_connected 丢掉旧 tasker 引用时，CPython refcount 同步跑
 # Tasker.__del__ → MaaTaskerDestroy——与 native 侧刚 post 出去的 stop 处理、controller 在途
@@ -2313,6 +2456,34 @@ class RoleBoot:
         return boot_role(self, target)
 
 
+def _salvage_role(rb):
+    """运行中 L3 救回（solo 冻结检测触发 A/B 的处置）：实例重启 + 重爬到 LOGGED_IN。
+
+    成功后 ``rb.tasker`` 已是重建的新 tasker（旧 tasker 进 _RETIRED_TASKERS 停尸房），调用方
+    用 ``t = rb.tasker`` 让剩余任务续跑。额度（BOOT_RESTART_MAX，与开机共享）用尽或任一环节
+    失败 → False（调用方放弃该号剩余任务——好过让脑死实例把后续任务全部 41s 假成功刷脏统计）。
+
+    注意：``restart_instance()`` 自身不查额度（boot_role 在调用前查），这里必须先查。
+    重爬 ``ensure(LOGGED_IN)`` 走 boot_role 漏斗：GAME_ALIVE 探针 → CONNECTED 重建 tasker
+    （持 _MAAFW_CONNECT_LOCK，兄弟号不受阻）→ LOGGED_IN act-first 重跑 start（BOOT_LAUNCH_SEMAPHORE
+    错峰）。全程 ~3-10min，期间兄弟号线程照常跑各自任务。
+    """
+    if rb.restarts_used >= BOOT_RESTART_MAX:
+        print(f"!!! [{rb.role}] 实例重启额度用尽（{BOOT_RESTART_MAX}），放弃该号剩余单人任务")
+        return False
+    print(f"!!! [{rb.role}] 升级 L3 实例重启 idx{rb.idx}（运行中冻结救回）")
+    rb.degraded = True                       # V10 预留标志就此接线：运行中塌陷过
+    try:
+        if not rb.restart_instance():        # 内部：post_stop + 停尸房 + be_restart_instance(HTTP≤500s)
+            return False
+        if not rb.ensure(BootStage.LOGGED_IN):
+            return False
+        return rb.tasker is not None
+    except Exception as e:
+        print(f"!!! [{rb.role}] L3 救回异常：{e}")
+        return False
+
+
 def boot_role(rb, target=BootStage.LOGGED_IN):
     """统一恢复漏斗（v2 V1）：对 rb 从当前 stage+1 爬到 target。
 
@@ -2486,7 +2657,7 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
                 f"以下账号 boot 未就绪（{len(booted)}/{len(boot_roles)} 台就绪）：{boot_failed}", boot_failed)
     role_idx = be_role_indices(roles)
     taskers = {role: rb.tasker for role, rb in booted.items()}
-    role_boots = booted   # 保留引用：V10 watchdog/运行中重爬用（当前未接线，预留）
+    role_boots = booted   # solo 冻结检测（触发 A/B）的运行中 L3 救回通道；收尾 clear 前一直有效
 
     if mode == "launch":
         print(f"=== launch 模式完成：{len(taskers)} 台就绪 ===")
@@ -2532,7 +2703,8 @@ def main(mode="full", solo_tasks=None, solo_ids=None):
         solo_all(taskers, entries=solo_entries, ids=solo_ids,
                  per_timeout=timeouts["solo"], overall_timeout=timeouts["solo_overall"],
                  solo_timeouts={e: timeouts.get(e, timeouts["solo"])
-                                for e in all_entries if e in timeouts})
+                                for e in all_entries if e in timeouts},
+                 role_boots=role_boots)
 
     # full/checkin 模式跑完：关掉全部实例释放内存
     if mode in ("full", "checkin"):
