@@ -52,9 +52,14 @@ def _save_snapshot(image: np.ndarray, tag: str, account: str) -> str | None:
     2026-09-10 加：拓印考验非必现（team1 同日正常、job2 堵入口），弹窗触发时
     只有 maafw 的 reco 行，看不到"弹窗长什么样/涂成什么样"——before/after 两张
     给 5r 排查留画面证据（识别之前的界面 + 操作之后的界面）。
+
+    写盘用 PIL（``Image.fromarray(image[:, :, ::-1])``，BGR→RGB）——与 run_5r
+    ``_save_timeout_screenshot`` 同款。原实现 ``import cv2`` 在 Mac .venv（无
+    opencv）每次抛 ModuleNotFoundError 被 except 吞掉，取证机制形同虚设
+    （2026-09-17 涂墨 8 轮 0 张截图实证）。
     """
     try:
-        import cv2
+        from PIL import Image
 
         if image is None or getattr(image, "size", 0) == 0:
             return None
@@ -63,7 +68,7 @@ def _save_snapshot(image: np.ndarray, tag: str, account: str) -> str | None:
             f"{datetime.now().strftime('%Y.%m.%d-%H.%M.%S')}_{account}_{tag}.png"
         )
         path = os.path.join(_TUYIN_SNAPSHOT_DIR, fname)
-        cv2.imwrite(path, image)
+        Image.fromarray(image[:, :, ::-1]).save(path)   # MaaFw 截图 BGR → PIL 要 RGB
         # 5r_collect 靠这行日志找截图（与 maafw timeout 截图的编排日志行同构）
         logger.info(f"[tuyinTuMo] 界面取证 {tag}: {path}")
         return path
