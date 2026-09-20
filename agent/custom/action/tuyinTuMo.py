@@ -708,6 +708,14 @@ class TuyinTuMo(CustomAction):
                 return CustomAction.RunResult(success=False)
             # 达标（或完成度读不到 = 弹窗可能已过）→ 点「完成」提交
             # ---- noise ④：按钮去中心化（30%~70% 区间随机落点，避开正中心指纹）----
+            # 提交前先取证：点「完成」后界面立即清空，提交后再截只拍到结算后的空场
+            # （2026-09-19 排查反馈：after_done 想看的是"涂成什么样提交的"）。
+            try:
+                _save_snapshot(
+                    ctrl.post_screencap().wait().get(), f"after_done_r{round_i}", account
+                )
+            except Exception:
+                pass
             tx, ty, tw, th = confirm
             if n > 0:
                 cx = tx + tw * random.uniform(0.3, 0.7)
@@ -717,10 +725,10 @@ class TuyinTuMo(CustomAction):
             ctrl.post_click(int(cx), int(cy)).wait()
             logger.info("[tuyinTuMo] 已点「完成」提交")
             time.sleep(3.0)
-            # 操作之后：完成提交、弹窗收起/结算动画后的界面
+            # 提交后界面（弹窗收起/结算动画后）：tag 区分"提交前/提交后"两张
             try:
                 _save_snapshot(
-                    ctrl.post_screencap().wait().get(), f"after_done_r{round_i}", account
+                    ctrl.post_screencap().wait().get(), f"post_done_r{round_i}", account
                 )
             except Exception:
                 pass
