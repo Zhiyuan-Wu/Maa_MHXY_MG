@@ -265,15 +265,21 @@ def _humanize_strokes(
     return out, [x for x in notes if x]
 
 
+# 连笔的跨笔连接线长度硬上限（px）。2026-09-20 梦蝶 r1 实证：随机的"尾→尾"取向
+# 拉出 181px 直线弦斜穿字心空白区（墨迹 21% 落在一条 211px 直线上，完成度被压到
+# 59% 触发整轮重涂）。人手连笔不会跨 40px 空白，超限对不参与合并。
+MERGE_CONNECTOR_MAX_PX = 40
+
+
 def _merge_pair(a: list[tuple[int, int]], b: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    """两笔连成一笔（a → b），中间可随机反转 b 让连接更顺（像人写连笔挑顺手方向）。
+    """两笔连成一笔（a → b），b 保持调用方选好的取向（不再内部掷硬币）。
 
     与超预算尾部合并同机制：纯点列首尾相接，共享一次 down/up；连接线是两笔端点的
-    直线插值，端点都在石碑 ROI 内 → 连接线也在 ROI 凸包内，不会画出弹窗。
+    直线插值。安全性由调用方保证：b 的两种取向中只有连接距离 ≤ ``MERGE_CONNECTOR_MAX_PX``
+    的那个才会被选为配对（见 ``_random_merge``）——连接线必然是短直线，且端点都在
+    石碑 ROI 内 → 不会画出弹窗，也不会斜穿 ROI 内的字符空白区（09-20 事故形态）。
     孤立点（首尾重合的占位 double-append）沿用尾部合并的占位语义。
     """
-    if random.random() < 0.5:
-        b = list(reversed(b))
     return list(a) + list(b)
 
 
@@ -285,6 +291,14 @@ def _random_merge(
     返回（新笔画列表, 变更说明）供日志。只有 <2 笔 / noise=0 时原样返回。
     每次执行的合并对数、挑中谁、是否反转都是随机的 → down/up 次数与分组结构
     每轮不同（结构级指纹，比逐像素抖动更难被识别）。
+
+    配对约束（2026-09-20 梦蝶 r1 事故后加）：
+    - 候选对的打分距离 = b **实际取向**的连接距离（`_merge_pair` 不再内部反转），
+      打分量的和画的永远是同一条线——旧实现两者解耦，打分量的"尾→头"57px，
+      内部反转后实际画"尾→尾"181px，直线弦斜穿字心空白；
+    - 两种取向（b 正/反）的连接距离都 > ``MERGE_CONNECTOR_MAX_PX`` 的对直接出局
+      （连线无硬上限时，随机系数 0.6~1.6 可让远对反超当选）；
+    - 全部候选对都超限时本轮放弃合并（宁可不连笔，不出长线）。
     """
     if noise <= 0 or len(strokes) < 2:
         return strokes, []
@@ -294,20 +308,29 @@ def _random_merge(
     for _ in range(n_pairs):
         if len(out) < 2:
             break
-        # 候选 = 所有余笔对，按"尾→头直线距离"升序；距离本身带随机扰动，
-        # 让"最近对"不总被选中（多数时候近、偶尔远——像人偶尔跨笔连）。
-        pairs = []
+        # 候选 = 所有余笔对 × b 的两种取向；连接距离 = 该取向下实际要画的直线长。
+        # 距离带随机扰动（×0.6~1.6），让"最近对"不总被选中（多数时候近、偶尔远——
+        # 像人偶尔跨笔连），但硬上限外的对根本不进候选——扰动只在合法圈内洗牌。
+        pairs = []  # (打分, i, j, b_reversed)
         for i in range(len(out)):
             for j in range(len(out)):
                 if i == j:
                     continue
-                d = ((out[i][-1][0] - out[j][0][0]) ** 2
-                     + (out[i][-1][1] - out[j][0][1]) ** 2) ** 0.5
-                pairs.append((d * random.uniform(0.6, 1.6), i, j))
+                tail = out[i][-1]
+                for b_rev in (False, True):
+                    head = out[j][-1] if b_rev else out[j][0]
+                    d = math.hypot(tail[0] - head[0], tail[1] - head[1])
+                    if d <= MERGE_CONNECTOR_MAX_PX:
+                        pairs.append((d * random.uniform(0.6, 1.6), i, j, b_rev))
+        if not pairs:
+            break  # 没有任何取向能短连：本轮放弃（后续轮也不太可能有）
         pairs.sort()
-        _, i, j = pairs[0]
-        merged = _merge_pair(out[i], out[j])
-        notes.append(f"#{j + 1}→#{i + 1}" + ("(反)" if random.random() < 0.5 else ""))
+        _, i, j, b_rev = pairs[0]
+        b = list(reversed(out[j])) if b_rev else out[j]
+        merged = _merge_pair(out[i], b)
+        notes.append(
+            f"#{j + 1}→#{i + 1}" + ("(反)" if b_rev else "")
+        )
         # 先删大索引再删小索引，避免索引位移
         for k in sorted((i, j), reverse=True):
             del out[k]
